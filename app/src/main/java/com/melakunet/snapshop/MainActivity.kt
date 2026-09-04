@@ -8,7 +8,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Notifications
@@ -74,7 +74,7 @@ private data class Tab(val label: String, val icon: ImageVector)
 private val tabs = listOf(
     Tab("Scan", Icons.Filled.CameraAlt),
     Tab("History", Icons.Filled.History),
-    Tab("Saved", Icons.Filled.Bookmark),
+    Tab("Saved", Icons.Filled.Favorite),
     Tab("Alerts", Icons.Filled.Notifications),
     Tab("Settings", Icons.Filled.Settings),
 )
