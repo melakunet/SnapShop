@@ -16,7 +16,7 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0.0"
-        buildConfigField("String", "BACKEND_URL", "\"http://10.0.2.2:8787\"")
+        buildConfigField("String", "BACKEND_URL", "\"http://192.168.2.12:8787\"")
     }
 
     buildTypes {

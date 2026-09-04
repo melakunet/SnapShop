@@ -22,11 +22,19 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import com.melakunet.snapshop.ui.alerts.AlertsScreen
+import com.melakunet.snapshop.ui.camera.CameraScreen
+import com.melakunet.snapshop.ui.history.HistoryScreen
+import com.melakunet.snapshop.ui.onboarding.OnboardingScreen
+import com.melakunet.snapshop.ui.saved.SavedScreen
+import com.melakunet.snapshop.ui.settings.SettingsScreen
 import com.melakunet.snapshop.ui.theme.SnapShopTheme
 
 class MainActivity : ComponentActivity() {
@@ -35,9 +43,29 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             SnapShopTheme {
-                SnapShopRoot()
+                AppRoot()
             }
         }
+    }
+}
+
+@Composable
+private fun AppRoot() {
+    val context = LocalContext.current
+    val prefs = remember { context.getSharedPreferences("snapshop", 0) }
+    var seenOnboarding by remember {
+        mutableStateOf(prefs.getBoolean("hasSeenOnboarding", false))
+    }
+
+    if (!seenOnboarding) {
+        OnboardingScreen(
+            onFinished = {
+                prefs.edit().putBoolean("hasSeenOnboarding", true).apply()
+                seenOnboarding = true
+            },
+        )
+    } else {
+        SnapShopRoot()
     }
 }
 
@@ -70,15 +98,14 @@ fun SnapShopRoot() {
             }
         },
     ) { padding ->
-        Box(
-            modifier = Modifier.fillMaxSize().padding(padding),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = tabs[selected].label + " - coming soon",
-                style = MaterialTheme.typography.headlineMedium,
-                color = MaterialTheme.colorScheme.onBackground,
-            )
+        Box(Modifier.fillMaxSize().padding(padding)) {
+            when (selected) {
+                0 -> CameraScreen()
+                1 -> HistoryScreen()
+                2 -> SavedScreen()
+                3 -> AlertsScreen()
+                4 -> SettingsScreen()
+            }
         }
     }
 }
