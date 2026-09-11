@@ -4,16 +4,7 @@ import android.graphics.BitmapFactory
 import android.text.format.DateUtils
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -21,13 +12,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -55,9 +40,22 @@ fun HistoryScreen() {
     val scans = allScans.filter {
         query.isBlank() || it.productName.contains(query, ignoreCase = true)
     }
+    
+    var showClearDialog by remember { mutableStateOf(false) }
 
-    Column(Modifier.fillMaxSize().padding(Spacing.lg)) {
-        Text("History", style = MaterialTheme.typography.headlineLarge)
+    Column(Modifier.fillMaxSize().background(Brand.backgroundDark).padding(Spacing.lg)) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("History", style = MaterialTheme.typography.headlineLarge, color = Color.White)
+            if (allScans.isNotEmpty()) {
+                TextButton(onClick = { showClearDialog = true }) {
+                    Text("Clear", color = Brand.error)
+                }
+            }
+        }
         Spacer(Modifier.height(Spacing.md))
         OutlinedTextField(
             value = query,
@@ -66,13 +64,19 @@ fun HistoryScreen() {
             placeholder = { Text("Search scans") },
             singleLine = true,
             shape = RoundedCornerShape(Radius.md),
+            colors = OutlinedTextFieldDefaults.colors(
+                unfocusedBorderColor = Color.White.copy(alpha = 0.1f),
+                focusedBorderColor = Brand.accentDark,
+                unfocusedTextColor = Color.White,
+                focusedTextColor = Color.White
+            )
         )
         Spacer(Modifier.height(Spacing.lg))
         if (scans.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(
                     "No scans found",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = Color.White.copy(alpha = 0.4f),
                 )
             }
         } else {
@@ -107,14 +111,37 @@ fun HistoryScreen() {
             }
         }
     }
+
+    if (showClearDialog) {
+        AlertDialog(
+            onDismissRequest = { showClearDialog = false },
+            title = { Text("Clear History") },
+            text = { Text("Are you sure you want to delete all scan records? This cannot be undone.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    scope.launch {
+                        dao.clearAllScanRecords()
+                        showClearDialog = false
+                    }
+                }) {
+                    Text("Clear All", color = Brand.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
 }
 
 @Composable
 private fun ScanRow(scan: ScanRecord) {
     Surface(
         shape = RoundedCornerShape(Radius.md),
-        color = MaterialTheme.colorScheme.surface,
-        modifier = Modifier.fillMaxWidth(),
+        color = Brand.surfaceDark,
+        modifier = Modifier.fillMaxWidth()
     ) {
         Row(
             Modifier.padding(Spacing.md),
@@ -124,7 +151,7 @@ private fun ScanRow(scan: ScanRecord) {
                 Modifier
                     .size(48.dp)
                     .clip(RoundedCornerShape(Radius.sm))
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                    .background(Color.White.copy(alpha = 0.05f)),
                 contentAlignment = Alignment.Center,
             ) {
                 if (scan.thumbnail != null) {
@@ -143,27 +170,27 @@ private fun ScanRow(scan: ScanRecord) {
                     Icon(
                         Icons.Filled.PhotoCamera,
                         contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        tint = Color.White.copy(alpha = 0.4f),
                     )
                 }
             }
             Spacer(Modifier.size(Spacing.md))
             Column(Modifier.weight(1f)) {
-                Text(scan.productName, style = MaterialTheme.typography.titleMedium)
+                Text(scan.productName, style = MaterialTheme.typography.titleMedium, color = Color.White)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     ModeChip(scan.mode)
                     Spacer(Modifier.size(Spacing.sm))
                     Text(
                         DateUtils.getRelativeTimeSpanString(scan.date).toString(),
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = Color.White.copy(alpha = 0.4f),
                     )
                 }
             }
             Text(
                 "$" + String.format("%.2f", scan.lowestPrice),
                 style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.primary,
+                color = Brand.accentDark,
             )
         }
     }
@@ -171,7 +198,7 @@ private fun ScanRow(scan: ScanRecord) {
 
 @Composable
 private fun ModeChip(mode: String) {
-    val tint = if (mode == "Deep") Brand.scanDeep else MaterialTheme.colorScheme.primary
+    val tint = if (mode == "Deep") Brand.scanDeep else Brand.accentDark
     Surface(
         shape = RoundedCornerShape(50),
         color = tint.copy(alpha = 0.15f),

@@ -19,6 +19,9 @@ interface SnapShopDao {
     @Delete
     suspend fun deleteScanRecord(record: ScanRecord)
 
+    @Query("DELETE FROM scan_records")
+    suspend fun clearAllScanRecords()
+
     // Saved Items
     @Query("SELECT * FROM saved_items ORDER BY savedDate DESC")
     fun getAllSavedItems(): Flow<List<SavedItem>>

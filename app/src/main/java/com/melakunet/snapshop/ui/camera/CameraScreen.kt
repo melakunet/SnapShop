@@ -123,15 +123,16 @@ private enum class ScanMode { PRECISION, DEEP }
 private sealed interface ScanState {
     data object Idle : ScanState
     data object Recording : ScanState
-    data class Cropping(val image: CropImage) : ScanState
+    data class Cropping(val image: CropImage, val originMode: String = "Crop") : ScanState
     data class Sending(val label: String) : ScanState
-    data class Done(val product: IdentifyResult, val prices: List<ShopItem>) : ScanState
+    data class Done(val product: IdentifyResult, val prices: List<ShopItem>, val thumbnail: ByteArray?, val modeLabel: String) : ScanState
     data class Error(val message: String) : ScanState
 }
 
 @Composable
 fun CameraScreen() {
     val context = LocalContext.current
+    val prefs = remember { context.getSharedPreferences("snapshop", 0) }
     val database = (context.applicationContext as SnapShopApplication).database
     val dao = database.dao()
     var hasPermission by remember {
@@ -158,7 +159,8 @@ fun CameraScreen() {
     val quotaManager = remember { QuotaManager(context) }
     val scope = rememberCoroutineScope()
     var state by remember { mutableStateOf<ScanState>(ScanState.Idle) }
-    var mode by remember { mutableStateOf(ScanMode.PRECISION) }
+    val initialMode = remember { if (prefs.getString("defaultScanMode", "Precision") == "Deep") ScanMode.DEEP else ScanMode.PRECISION }
+    var mode by remember { mutableStateOf(initialMode) }
     var showUrlSearch by remember { mutableStateOf(false) }
     var showPaywall by remember { mutableStateOf(false) }
     var recording by remember { mutableStateOf<Recording?>(null) }
@@ -183,12 +185,12 @@ fun CameraScreen() {
                 if (!quotaManager.canScan()) {
                     showPaywall = true
                 } else {
-                    runScan(scope, { state = it }, "Analyzing video...", quotaManager) {
+                    runScan(scope, { state = it }, "Analyzing video...", "Deep Scan", quotaManager) {
                         val file = context.copyUriToCache(uri, "picked_video") ?: throw IllegalStateException("Could not open video")
                         val frames = extractKeyframes(file)
                         val product = BackendClient.identifyDeep(frames)
                         val prices = product.searchQuery.trim().takeIf { it.isNotEmpty() }?.let { BackendClient.shop(it) } ?: emptyList()
-                        product to prices
+                        Triple(product, prices, frames.firstOrNull())
                     }
                 }
             }
@@ -202,11 +204,13 @@ fun CameraScreen() {
 
     Box(Modifier.fillMaxSize().background(Brand.backgroundDark)) {
         if (state is ScanState.Cropping) {
-            val croppingImage = (state as ScanState.Cropping).image
+            val croppingState = state as ScanState.Cropping
+            val croppingImage = croppingState.image
             AdjustCropScreen(
                 image = croppingImage,
                 onCancel = { state = ScanState.Idle },
                 onScan = { selection ->
+                    val origin = croppingState.originMode
                     state = ScanState.Idle
                     if (!quotaManager.canScan()) {
                         showPaywall = true
@@ -216,20 +220,21 @@ fun CameraScreen() {
                                 selection.image.bitmap.cropImage(selection.crop)
                             }
                             val jpeg = toCappedJpeg(cropped, 1280, 80)
-                            runScan(scope, { state = it }, "Identifying...", quotaManager) {
+                            runScan(scope, { state = it }, "Identifying...", origin + " Scan", quotaManager) {
                                 val result = BackendClient.scan(jpeg)
                                 val product = result.first
                                 val prices = result.second
                                 val name = listOf(product.brand, product.model).filter { it.isNotEmpty() }.joinToString(" ").ifEmpty { product.category }
+                                val thumb = toCappedJpeg(jpeg, 200, 70)
                                 dao.insertScanRecord(ScanRecord(
                                     date = System.currentTimeMillis(),
                                     productName = name,
-                                    mode = "Crop",
-                                    thumbnail = toCappedJpeg(jpeg, 200, 70),
+                                    mode = origin,
+                                    thumbnail = thumb,
                                     lowestPrice = prices.minOfOrNull { it.extractedPrice } ?: 0.0,
                                     searchQuery = product.searchQuery
                                 ))
-                                result
+                                Triple(product, prices, thumb)
                             }
                         }
                     }
@@ -286,10 +291,12 @@ fun CameraScreen() {
                 Spacer(Modifier.height(Spacing.md))
                 SearchField(
                     onSubmit = { query ->
-                        runScan(scope, { state = it }, "Searching...") {
-                            IdentifyResult("", "", query, confidence = 1.0, searchQuery = query) to BackendClient.shop(query)
-                        }
-                    },
+                    runScan(scope, { state = it }, "Searching...", "Search") {
+                        val product = IdentifyResult("", "", query, confidence = 1.0, searchQuery = query)
+                        val prices = BackendClient.shop(query)
+                        Triple(product, prices, null)
+                    }
+                },
                     onMic = { Toast.makeText(context, "Voice search coming soon", Toast.LENGTH_SHORT).show() },
                 )
                 Spacer(Modifier.height(Spacing.sm))
@@ -311,21 +318,11 @@ fun CameraScreen() {
                             when {
                                 state is ScanState.Sending -> Unit
                                 state is ScanState.Recording -> recording?.stop()
-                                mode == ScanMode.PRECISION -> capturePhoto(imageCapture, ContextCompat.getMainExecutor(context)) { jpeg: ByteArray?, err: String? ->
-                                    if (jpeg == null) state = ScanState.Error(err ?: "Capture failed") else runScan(scope, { state = it }, "Identifying...", quotaManager) {
-                                        val result = BackendClient.scan(jpeg)
-                                        val product = result.first
-                                        val prices = result.second
-                                        val name = listOf(product.brand, product.model).filter { it.isNotEmpty() }.joinToString(" ").ifEmpty { product.category }
-                                        dao.insertScanRecord(ScanRecord(
-                                            date = System.currentTimeMillis(),
-                                            productName = name,
-                                            mode = "Precision",
-                                            thumbnail = toCappedJpeg(jpeg, 200, 70),
-                                            lowestPrice = prices.minOfOrNull { it.extractedPrice } ?: 0.0,
-                                            searchQuery = product.searchQuery
-                                        ))
-                                        result
+                                mode == ScanMode.PRECISION -> capturePhoto(imageCapture, ContextCompat.getMainExecutor(context)) { bitmap: Bitmap?, err: String? ->
+                                    if (bitmap == null) {
+                                        state = ScanState.Error(err ?: "Capture failed")
+                                    } else {
+                                        state = ScanState.Cropping(CropImage(Uri.EMPTY, bitmap), "Precision")
                                     }
                                 }
                                 else -> {
@@ -335,21 +332,22 @@ fun CameraScreen() {
                                         if (event is VideoRecordEvent.Finalize) {
                                             recording = null
                                             if (event.hasError()) state = ScanState.Error("Recording failed (" + event.error + ")")
-                                            else runScan(scope, { state = it }, "Analyzing video...", quotaManager) {
-                                                val frames = extractKeyframes(file)
-                                                val product = BackendClient.identifyDeep(frames)
-                                                val prices = product.searchQuery.trim().takeIf { it.isNotEmpty() }?.let { BackendClient.shop(it) } ?: emptyList()
-                                                val name = listOf(product.brand, product.model).filter { it.isNotEmpty() }.joinToString(" ").ifEmpty { product.category }
-                                                dao.insertScanRecord(ScanRecord(
-                                                    date = System.currentTimeMillis(),
-                                                    productName = name,
-                                                    mode = "Deep",
-                                                    thumbnail = frames.firstOrNull()?.let { toCappedJpeg(it, 200, 70) },
-                                                    lowestPrice = prices.minOfOrNull { it.extractedPrice } ?: 0.0,
-                                                    searchQuery = product.searchQuery
-                                                ))
-                                                product to prices
-                                            }
+                                            else runScan(scope, { state = it }, "Analyzing video...", "Deep Scan", quotaManager) {
+                                            val frames = extractKeyframes(file)
+                                            val product = BackendClient.identifyDeep(frames)
+                                            val prices = product.searchQuery.trim().takeIf { it.isNotEmpty() }?.let { BackendClient.shop(it) } ?: emptyList()
+                                            val name = listOf(product.brand, product.model).filter { it.isNotEmpty() }.joinToString(" ").ifEmpty { product.category }
+                                            val thumb = frames.firstOrNull()?.let { toCappedJpeg(it, 200, 70) }
+                                            dao.insertScanRecord(ScanRecord(
+                                                date = System.currentTimeMillis(),
+                                                productName = name,
+                                                mode = "Deep",
+                                                thumbnail = thumb,
+                                                lowestPrice = prices.minOfOrNull { it.extractedPrice } ?: 0.0,
+                                                searchQuery = product.searchQuery
+                                            ))
+                                            Triple(product, prices, thumb)
+                                        }
                                         }
                                     }
                                     recording = rec
@@ -367,7 +365,7 @@ fun CameraScreen() {
 
         when (val s = state) {
             is ScanState.Sending -> FullScreenLoading(s.label)
-            is ScanState.Done -> ResultPanel(s.product, s.prices, dao) { state = ScanState.Idle }
+            is ScanState.Done -> ResultPanel(s.product, s.prices, s.thumbnail, s.modeLabel, dao) { state = ScanState.Idle }
             is ScanState.Error -> ErrorPanel(s.message) { state = ScanState.Idle }
             else -> Unit
         }
@@ -376,8 +374,35 @@ fun CameraScreen() {
             Paywall(onDismiss = { showPaywall = false })
         }
 
-        showUrlSearch?.let { } // Removed legacy block
-        // Rest of overlays handled below
+        if (showUrlSearch) {
+            SearchOverlay(
+                title = "Paste a product link",
+                placeholder = "https://...",
+                onDismiss = { showUrlSearch = false },
+                onSubmit = { url ->
+                    showUrlSearch = false
+                    if (!quotaManager.canScan()) {
+                        showPaywall = true
+                    } else {
+                        runScan(scope, { state = it }, "Reading link...", "URL Scan", quotaManager) {
+                            val result = BackendClient.identifyUrl(url)
+                            val product = result.first
+                            val prices = result.second
+                            val name = listOf(product.brand, product.model).filter { it.isNotEmpty() }.joinToString(" ").ifEmpty { product.category }
+                            dao.insertScanRecord(ScanRecord(
+                                date = System.currentTimeMillis(),
+                                productName = name,
+                                mode = "URL",
+                                thumbnail = null,
+                                lowestPrice = prices.minOfOrNull { it.extractedPrice } ?: 0.0,
+                                searchQuery = product.searchQuery
+                            ))
+                            Triple(product, prices, null)
+                        }
+                    }
+                },
+            )
+        }
     }
 }
 
@@ -536,134 +561,6 @@ private fun SearchOverlay(title: String, placeholder: String, onDismiss: () -> U
 }
 
 @Composable
-private fun ResultPanel(product: IdentifyResult, prices: List<ShopItem>, dao: com.melakunet.snapshop.data.SnapShopDao, onDismiss: () -> Unit) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var showAlertDialog by remember { mutableStateOf<ShopItem?>(null) }
-
-    Surface(modifier = Modifier.fillMaxSize(), color = Brand.backgroundDark) {
-        Column(Modifier.padding(Spacing.lg)) {
-            val name = listOf(product.brand, product.model).filter { it.isNotEmpty() }.joinToString(" ").ifEmpty { product.category }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(name, style = MaterialTheme.typography.headlineMedium, color = Color.White, modifier = Modifier.weight(1f))
-                Text("Close", color = Brand.accentDark, modifier = Modifier.clickable { onDismiss() })
-            }
-            Spacer(Modifier.height(Spacing.lg))
-            if (prices.isEmpty()) {
-                Text("No prices to show.", color = Color.White)
-                Spacer(Modifier.weight(1f))
-            } else {
-                LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(Spacing.sm)) {
-                    items(prices) { item ->
-                        Surface(shape = RoundedCornerShape(12.dp), color = Brand.surfaceDark, modifier = Modifier.fillMaxWidth()) {
-                            Column(Modifier.padding(Spacing.md)) {
-                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable {
-                                    runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(item.link))) }
-                                }) {
-                                    Column(Modifier.weight(1f)) {
-                                        Text(item.source, color = Color.White)
-                                        Text(item.delivery, color = Color.White.copy(alpha = 0.7f))
-                                    }
-                                    Text(item.price, color = Brand.accentDark)
-                                }
-                                Spacer(Modifier.height(Spacing.sm))
-                                Row(horizontalArrangement = Arrangement.spacedBy(Spacing.md)) {
-                                    Button(
-                                        onClick = {
-                                            scope.launch {
-                                                dao.insertSavedItem(SavedItem(
-                                                    productName = name,
-                                                    searchQuery = product.searchQuery,
-                                                    thumbnail = item.thumbnail,
-                                                    savedPrice = item.extractedPrice,
-                                                    savedDate = System.currentTimeMillis(),
-                                                    link = item.link,
-                                                    source = item.source,
-                                                    currentLowestPrice = item.extractedPrice
-                                                ))
-                                                Toast.makeText(context, "Saved!", Toast.LENGTH_SHORT).show()
-                                            }
-                                        },
-                                        modifier = Modifier.weight(1f),
-                                        shape = RoundedCornerShape(8.dp)
-                                    ) {
-                                        Text("Save")
-                                    }
-                                    Button(
-                                        onClick = { showAlertDialog = item },
-                                        modifier = Modifier.weight(1f),
-                                        shape = RoundedCornerShape(8.dp)
-                                    ) {
-                                        Text("Set alert")
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            Spacer(Modifier.height(Spacing.md))
-            Button(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("Scan again") }
-        }
-    }
-
-    showAlertDialog?.let { item ->
-        val name = listOf(product.brand, product.model).filter { it.isNotEmpty() }.joinToString(" ").ifEmpty { product.category }
-        PriceAlertDialog(
-            productName = name,
-            currentPrice = item.extractedPrice,
-            onDismiss = { showAlertDialog = null },
-            onConfirm = { targetPrice ->
-                scope.launch {
-                    dao.insertPriceAlert(PriceAlert(
-                        savedItemId = "", // Optional: link to a SavedItem if needed
-                        productName = name,
-                        searchQuery = product.searchQuery,
-                        targetPrice = targetPrice,
-                        createdDate = System.currentTimeMillis(),
-                        lastCheckedDate = System.currentTimeMillis(),
-                        triggered = item.extractedPrice <= targetPrice
-                    ))
-                    showAlertDialog = null
-                    Toast.makeText(context, "Alert set!", Toast.LENGTH_SHORT).show()
-                }
-            }
-        )
-    }
-}
-
-@Composable
-private fun PriceAlertDialog(productName: String, currentPrice: Double, onDismiss: () -> Unit, onConfirm: (Double) -> Unit) {
-    var text by remember { mutableStateOf(String.format("%.2f", currentPrice * 0.9)) }
-    Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.55f)), contentAlignment = Alignment.Center) {
-        Surface(shape = RoundedCornerShape(24.dp), color = Brand.surfaceDark, modifier = Modifier.padding(Spacing.lg).fillMaxWidth()) {
-            Column(Modifier.padding(Spacing.lg)) {
-                Text("Set Price Alert", style = MaterialTheme.typography.titleMedium, color = Color.White)
-                Spacer(Modifier.height(Spacing.sm))
-                Text("Notify me when $productName drops below:", color = Color.White.copy(alpha = 0.7f))
-                Spacer(Modifier.height(Spacing.md))
-                androidx.compose.material3.OutlinedTextField(
-                    value = text,
-                    onValueChange = { text = it },
-                    prefix = { Text("$") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Decimal)
-                )
-                Spacer(Modifier.height(Spacing.lg))
-                Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-                    Text("Cancel", color = Color.White, modifier = Modifier.clickable { onDismiss() })
-                    Spacer(Modifier.width(Spacing.xl))
-                    Text("Set Alert", color = Brand.accentDark, modifier = Modifier.clickable {
-                        text.toDoubleOrNull()?.let { onConfirm(it) }
-                    })
-                }
-            }
-        }
-    }
-}
-
-@Composable
 private fun AdjustCropScreen(image: CropImage, onCancel: () -> Unit, onScan: (CropSelection) -> Unit) {
     var crop by remember(image) {
         mutableStateOf(CropRect(0.15f, 0.2f, 0.85f, 0.8f))
@@ -790,14 +687,21 @@ private fun CropRect.handleDrag(displayRect: androidx.compose.ui.geometry.Rect, 
     }
 }
 
-private fun runScan(scope: kotlinx.coroutines.CoroutineScope, stateSetter: (ScanState) -> Unit, label: String, quotaManager: QuotaManager? = null, block: suspend () -> Pair<IdentifyResult, List<ShopItem>>) {
-    stateSetter(ScanState.Sending(label))
+private fun runScan(
+    scope: kotlinx.coroutines.CoroutineScope,
+    stateSetter: (ScanState) -> Unit,
+    loadingLabel: String,
+    modeLabel: String = "Scan",
+    quotaManager: QuotaManager? = null,
+    block: suspend () -> Triple<IdentifyResult, List<ShopItem>, ByteArray?>
+) {
+    stateSetter(ScanState.Sending(loadingLabel))
     scope.launch {
         stateSetter(
             try {
-                val (product, prices) = block()
+                val (product, prices, thumb) = block()
                 quotaManager?.consumeQuota()
-                ScanState.Done(product, prices)
+                ScanState.Done(product, prices, thumb, modeLabel)
             } catch (e: Exception) {
                 if (e is java.io.IOException) {
                     android.util.Log.e("BackendClient", "Connection failure", e)
@@ -886,7 +790,7 @@ private fun android.content.Context.copyUriToCache(uri: Uri, prefix: String): Fi
 
 private fun drawCurvedCorners(rect: androidx.compose.ui.geometry.Rect, color: Color) {}
 
-private fun capturePhoto(imageCapture: ImageCapture, executor: java.util.concurrent.Executor, onResult: (ByteArray?, String?) -> Unit) {
+private fun capturePhoto(imageCapture: ImageCapture, executor: java.util.concurrent.Executor, onResult: (Bitmap?, String?) -> Unit) {
     imageCapture.takePicture(executor, object : ImageCapture.OnImageCapturedCallback() {
         override fun onCaptureSuccess(image: ImageProxy) {
             try {
@@ -896,7 +800,14 @@ private fun capturePhoto(imageCapture: ImageCapture, executor: java.util.concurr
                     val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
                     bitmap = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
                 }
-                onResult(toCappedJpeg(bitmap, 1280, 80), null)
+                // Cap to a reasonable size for the crop screen (e.g., 2048) to avoid OOM
+                val maxSide = 2048
+                val longest = maxOf(bitmap.width, bitmap.height)
+                if (longest > maxSide) {
+                    val scale = maxSide.toFloat() / longest
+                    bitmap = Bitmap.createScaledBitmap(bitmap, (bitmap.width * scale).toInt(), (bitmap.height * scale).toInt(), true)
+                }
+                onResult(bitmap, null)
             } catch (e: Exception) {
                 onResult(null, e.message)
             } finally {
