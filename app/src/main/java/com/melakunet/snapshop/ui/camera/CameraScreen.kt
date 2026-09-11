@@ -70,6 +70,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
@@ -84,6 +85,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
@@ -92,6 +94,11 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import com.melakunet.snapshop.SnapShopApplication
+import com.melakunet.snapshop.data.ScanRecord
+import com.melakunet.snapshop.data.QuotaManager
+import com.melakunet.snapshop.data.PriceAlert
+import com.melakunet.snapshop.data.SavedItem
 import com.melakunet.snapshop.models.IdentifyResult
 import com.melakunet.snapshop.models.ShopItem
 import com.melakunet.snapshop.network.BackendClient
@@ -107,11 +114,16 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
+data class CropRect(val left: Float, val top: Float, val right: Float, val bottom: Float)
+data class CropImage(val uri: Uri, val bitmap: Bitmap, val displayRect: androidx.compose.ui.geometry.Rect = androidx.compose.ui.geometry.Rect.Zero)
+data class CropSelection(val image: CropImage, val crop: CropRect)
+
 private enum class ScanMode { PRECISION, DEEP }
 
 private sealed interface ScanState {
     data object Idle : ScanState
     data object Recording : ScanState
+    data class Cropping(val image: CropImage) : ScanState
     data class Sending(val label: String) : ScanState
     data class Done(val product: IdentifyResult, val prices: List<ShopItem>) : ScanState
     data class Error(val message: String) : ScanState
@@ -120,6 +132,8 @@ private sealed interface ScanState {
 @Composable
 fun CameraScreen() {
     val context = LocalContext.current
+    val database = (context.applicationContext as SnapShopApplication).database
+    val dao = database.dao()
     var hasPermission by remember {
         mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
     }
@@ -141,11 +155,12 @@ fun CameraScreen() {
     }
 
     val lifecycleOwner = LocalLifecycleOwner.current
+    val quotaManager = remember { QuotaManager(context) }
     val scope = rememberCoroutineScope()
     var state by remember { mutableStateOf<ScanState>(ScanState.Idle) }
     var mode by remember { mutableStateOf(ScanMode.PRECISION) }
     var showUrlSearch by remember { mutableStateOf(false) }
-    var showAdjustCrop by remember { mutableStateOf<CropImage?>(null) }
+    var showPaywall by remember { mutableStateOf(false) }
     var recording by remember { mutableStateOf<Recording?>(null) }
     var captureInFlight by remember { mutableStateOf(false) }
 
@@ -159,19 +174,25 @@ fun CameraScreen() {
     val photoPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
         scope.launch {
-            showAdjustCrop = withContext(Dispatchers.IO) { context.loadCropImage(uri) }
+            val cropImage = withContext(Dispatchers.IO) { context.loadCropImage(uri) }
+            state = ScanState.Cropping(cropImage)
         }
     }
-    val videoPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        runScan(scope, { state = it }, "Analyzing video...") {
-            val file = context.copyUriToCache(uri, "picked_video") ?: throw IllegalStateException("Could not open video")
-            val frames = extractKeyframes(file)
-            val product = BackendClient.identifyDeep(frames)
-            val prices = product.searchQuery.trim().takeIf { it.isNotEmpty() }?.let { BackendClient.shop(it) } ?: emptyList()
-            product to prices
+        val videoPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+            if (uri != null) {
+                if (!quotaManager.canScan()) {
+                    showPaywall = true
+                } else {
+                    runScan(scope, { state = it }, "Analyzing video...", quotaManager) {
+                        val file = context.copyUriToCache(uri, "picked_video") ?: throw IllegalStateException("Could not open video")
+                        val frames = extractKeyframes(file)
+                        val product = BackendClient.identifyDeep(frames)
+                        val prices = product.searchQuery.trim().takeIf { it.isNotEmpty() }?.let { BackendClient.shop(it) } ?: emptyList()
+                        product to prices
+                    }
+                }
+            }
         }
-    }
 
     androidx.compose.runtime.DisposableEffect(Unit) {
         onDispose {
@@ -179,126 +200,184 @@ fun CameraScreen() {
         }
     }
 
-    Box(Modifier.fillMaxSize()) {
-        AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { ctx ->
-                val previewView = PreviewView(ctx)
-                previewView.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-                val future = ProcessCameraProvider.getInstance(ctx)
-                future.addListener({
-                    val provider = future.get()
-                    val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
-                    provider.unbindAll()
-                    provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture, videoCapture)
-                }, ContextCompat.getMainExecutor(ctx))
-                previewView
-            },
-        )
-
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val insetX = size.width * 0.12f
-            val insetTop = size.height * 0.18f
-            val insetBottom = size.height * 0.24f
-            val left = insetX
-            val top = insetTop
-            val right = size.width - insetX
-            val bottom = size.height - insetBottom
-            drawCurvedCorners(androidx.compose.ui.geometry.Rect(left, top, right, bottom), if (mode == ScanMode.PRECISION) Brand.accentDark else Brand.scanDeep)
-            val center = Offset(size.width / 2f, (top + bottom) / 2f)
-            drawCircle(Color.White.copy(alpha = 0.18f), 18.dp.toPx(), center, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.5.dp.toPx()))
-            drawLine(Color.White.copy(alpha = 0.28f), Offset(center.x - 14.dp.toPx(), center.y), Offset(center.x + 14.dp.toPx(), center.y), 1.5.dp.toPx(), StrokeCap.Round)
-            drawLine(Color.White.copy(alpha = 0.28f), Offset(center.x, center.y - 14.dp.toPx()), Offset(center.x, center.y + 14.dp.toPx()), 1.5.dp.toPx(), StrokeCap.Round)
-        }
-
-        Column(
-            Modifier.fillMaxSize().padding(top = 12.dp, start = Spacing.lg, end = Spacing.lg, bottom = Spacing.lg),
-        ) {
-            Spacer(Modifier.height(Spacing.sm))
-            SegmentedControl(mode = mode, enabled = state is ScanState.Idle, onPrecision = { mode = ScanMode.PRECISION }, onDeep = { mode = ScanMode.DEEP })
-            Spacer(Modifier.height(Spacing.md))
-            SearchField(
-                onSubmit = { query ->
-                    runScan(scope, { state = it }, "Searching...") {
-                        IdentifyResult("", "", query, confidence = 1.0, searchQuery = query) to BackendClient.shop(query)
+    Box(Modifier.fillMaxSize().background(Brand.backgroundDark)) {
+        if (state is ScanState.Cropping) {
+            val croppingImage = (state as ScanState.Cropping).image
+            AdjustCropScreen(
+                image = croppingImage,
+                onCancel = { state = ScanState.Idle },
+                onScan = { selection ->
+                    state = ScanState.Idle
+                    if (!quotaManager.canScan()) {
+                        showPaywall = true
+                    } else {
+                        scope.launch {
+                            val cropped = withContext(Dispatchers.IO) {
+                                selection.image.bitmap.cropImage(selection.crop)
+                            }
+                            val jpeg = toCappedJpeg(cropped, 1280, 80)
+                            runScan(scope, { state = it }, "Identifying...", quotaManager) {
+                                val result = BackendClient.scan(jpeg)
+                                val product = result.first
+                                val prices = result.second
+                                val name = listOf(product.brand, product.model).filter { it.isNotEmpty() }.joinToString(" ").ifEmpty { product.category }
+                                dao.insertScanRecord(ScanRecord(
+                                    date = System.currentTimeMillis(),
+                                    productName = name,
+                                    mode = "Crop",
+                                    thumbnail = toCappedJpeg(jpeg, 200, 70),
+                                    lowestPrice = prices.minOfOrNull { it.extractedPrice } ?: 0.0,
+                                    searchQuery = product.searchQuery
+                                ))
+                                result
+                            }
+                        }
                     }
                 },
-                onMic = { Toast.makeText(context, "Voice search coming soon", Toast.LENGTH_SHORT).show() },
             )
-            Spacer(Modifier.height(Spacing.sm))
-            PasteLinkChip(onClick = { showUrlSearch = true })
-        }
+        } else {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx ->
+                    val previewView = PreviewView(ctx)
+                    previewView.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                    val future = ProcessCameraProvider.getInstance(ctx)
+                    future.addListener({
+                        val provider = future.get()
+                        val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
+                        provider.unbindAll()
+                        provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture, videoCapture)
+                    }, ContextCompat.getMainExecutor(ctx))
+                    previewView
+                },
+            )
 
-        Column(
-            Modifier.align(Alignment.BottomCenter).padding(bottom = Spacing.lg),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            CaptionPill(text = if (mode == ScanMode.PRECISION) "Hold steady — one precise shot" else "Pan slowly around the product")
-            Spacer(Modifier.height(Spacing.md))
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Spacing.lg)) {
-                importButton(Icons.Filled.PhotoLibrary) { photoPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
-                CaptureButton(mode = mode, isRecording = state is ScanState.Recording) {
-                    when {
-                        state is ScanState.Sending -> Unit
-                        state is ScanState.Recording -> recording?.stop()
-                        mode == ScanMode.PRECISION -> capturePhoto(imageCapture, ContextCompat.getMainExecutor(context)) { jpeg: ByteArray?, err: String? ->
-                            if (jpeg == null) state = ScanState.Error(err ?: "Capture failed") else runScan(scope, { state = it }, "Identifying...") { BackendClient.scan(jpeg) }
-                        }
-                        else -> {
-                            val file = File(context.cacheDir, "deep_scan.mp4")
-                            state = ScanState.Recording
-                            val rec = videoCapture.output.prepareRecording(context, FileOutputOptions.Builder(file).build()).start(ContextCompat.getMainExecutor(context)) { event ->
-                                if (event is VideoRecordEvent.Finalize) {
-                                    recording = null
-                                    if (event.hasError()) state = ScanState.Error("Recording failed (" + event.error + ")")
-                                    else runScan(scope, { state = it }, "Analyzing video...") {
-                                        val frames = extractKeyframes(file)
-                                        val product = BackendClient.identifyDeep(frames)
-                                        val prices = product.searchQuery.trim().takeIf { it.isNotEmpty() }?.let { BackendClient.shop(it) } ?: emptyList()
-                                        product to prices
-                                    }
-                                }
-                            }
-                            recording = rec
-                            scope.launch { delay(10_000); recording?.stop() }
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val insetX = size.width * 0.12f
+                val insetTop = size.height * 0.18f
+                val insetBottom = size.height * 0.24f
+                val left = insetX
+                val top = insetTop
+                val right = size.width - insetX
+                val bottom = size.height - insetBottom
+                drawCurvedCorners(androidx.compose.ui.geometry.Rect(left, top, right, bottom), if (mode == ScanMode.PRECISION) Brand.accentDark else Brand.scanDeep)
+                val center = Offset(size.width / 2f, (top + bottom) / 2f)
+                drawCircle(Color.White.copy(alpha = 0.18f), 18.dp.toPx(), center, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.5.dp.toPx()))
+                drawLine(Color.White.copy(alpha = 0.28f), Offset(center.x - 14.dp.toPx(), center.y), Offset(center.x + 14.dp.toPx(), center.y), 1.5.dp.toPx(), StrokeCap.Round)
+                drawLine(Color.White.copy(alpha = 0.28f), Offset(center.x, center.y - 14.dp.toPx()), Offset(center.x, center.y + 14.dp.toPx()), 1.5.dp.toPx(), StrokeCap.Round)
+            }
+
+            Column(
+                Modifier.fillMaxSize().padding(top = 12.dp, start = Spacing.lg, end = Spacing.lg, bottom = Spacing.lg),
+            ) {
+                Spacer(Modifier.height(Spacing.sm))
+                SegmentedControl(
+                    mode = mode,
+                    enabled = state is ScanState.Idle,
+                    onPrecision = { mode = ScanMode.PRECISION },
+                    onDeep = {
+                        if (quotaManager.isPro) {
+                            mode = ScanMode.DEEP
+                        } else {
+                            showPaywall = true
                         }
                     }
-                }
-                importButton(Icons.Filled.Videocam) {
-                    videoPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
+                )
+                Spacer(Modifier.height(Spacing.md))
+                SearchField(
+                    onSubmit = { query ->
+                        runScan(scope, { state = it }, "Searching...") {
+                            IdentifyResult("", "", query, confidence = 1.0, searchQuery = query) to BackendClient.shop(query)
+                        }
+                    },
+                    onMic = { Toast.makeText(context, "Voice search coming soon", Toast.LENGTH_SHORT).show() },
+                )
+                Spacer(Modifier.height(Spacing.sm))
+                PasteLinkChip(onClick = { showUrlSearch = true })
+            }
+
+            Column(
+                Modifier.align(Alignment.BottomCenter).padding(bottom = Spacing.lg),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                CaptionPill(text = if (mode == ScanMode.PRECISION) "Hold steady — one precise shot" else "Pan slowly around the product")
+                Spacer(Modifier.height(Spacing.md))
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Spacing.lg)) {
+                    importButton(Icons.Filled.PhotoLibrary) { photoPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
+                    CaptureButton(mode = mode, isRecording = state is ScanState.Recording) {
+                        if (!quotaManager.canScan()) {
+                            showPaywall = true
+                        } else {
+                            when {
+                                state is ScanState.Sending -> Unit
+                                state is ScanState.Recording -> recording?.stop()
+                                mode == ScanMode.PRECISION -> capturePhoto(imageCapture, ContextCompat.getMainExecutor(context)) { jpeg: ByteArray?, err: String? ->
+                                    if (jpeg == null) state = ScanState.Error(err ?: "Capture failed") else runScan(scope, { state = it }, "Identifying...", quotaManager) {
+                                        val result = BackendClient.scan(jpeg)
+                                        val product = result.first
+                                        val prices = result.second
+                                        val name = listOf(product.brand, product.model).filter { it.isNotEmpty() }.joinToString(" ").ifEmpty { product.category }
+                                        dao.insertScanRecord(ScanRecord(
+                                            date = System.currentTimeMillis(),
+                                            productName = name,
+                                            mode = "Precision",
+                                            thumbnail = toCappedJpeg(jpeg, 200, 70),
+                                            lowestPrice = prices.minOfOrNull { it.extractedPrice } ?: 0.0,
+                                            searchQuery = product.searchQuery
+                                        ))
+                                        result
+                                    }
+                                }
+                                else -> {
+                                    val file = File(context.cacheDir, "deep_scan.mp4")
+                                    state = ScanState.Recording
+                                    val rec = videoCapture.output.prepareRecording(context, FileOutputOptions.Builder(file).build()).start(ContextCompat.getMainExecutor(context)) { event ->
+                                        if (event is VideoRecordEvent.Finalize) {
+                                            recording = null
+                                            if (event.hasError()) state = ScanState.Error("Recording failed (" + event.error + ")")
+                                            else runScan(scope, { state = it }, "Analyzing video...", quotaManager) {
+                                                val frames = extractKeyframes(file)
+                                                val product = BackendClient.identifyDeep(frames)
+                                                val prices = product.searchQuery.trim().takeIf { it.isNotEmpty() }?.let { BackendClient.shop(it) } ?: emptyList()
+                                                val name = listOf(product.brand, product.model).filter { it.isNotEmpty() }.joinToString(" ").ifEmpty { product.category }
+                                                dao.insertScanRecord(ScanRecord(
+                                                    date = System.currentTimeMillis(),
+                                                    productName = name,
+                                                    mode = "Deep",
+                                                    thumbnail = frames.firstOrNull()?.let { toCappedJpeg(it, 200, 70) },
+                                                    lowestPrice = prices.minOfOrNull { it.extractedPrice } ?: 0.0,
+                                                    searchQuery = product.searchQuery
+                                                ))
+                                                product to prices
+                                            }
+                                        }
+                                    }
+                                    recording = rec
+                                    scope.launch { delay(10_000); recording?.stop() }
+                                }
+                            }
+                        }
+                    }
+                    importButton(Icons.Filled.Videocam) {
+                        videoPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
+                    }
                 }
             }
         }
 
         when (val s = state) {
             is ScanState.Sending -> FullScreenLoading(s.label)
-            is ScanState.Done -> ResultPanel(s.product, s.prices) { state = ScanState.Idle }
+            is ScanState.Done -> ResultPanel(s.product, s.prices, dao) { state = ScanState.Idle }
             is ScanState.Error -> ErrorPanel(s.message) { state = ScanState.Idle }
             else -> Unit
         }
 
-        if (showUrlSearch) {
-            SearchOverlay(
-                title = "Paste a product link",
-                placeholder = "https://...",
-                onDismiss = { showUrlSearch = false },
-                onSubmit = { url ->
-                    showUrlSearch = false
-                    runScan(scope, { state = it }, "Reading link...") { BackendClient.identifyUrl(url) }
-                },
-            )
+        if (showPaywall) {
+            Paywall(onDismiss = { showPaywall = false })
         }
 
-        showAdjustCrop?.let { image ->
-            AdjustCropScreen(
-                image = image,
-                onCancel = { showAdjustCrop = null },
-                onScan = { crop ->
-                    showAdjustCrop = null
-                    runScan(scope, { state = it }, "Identifying...") { BackendClient.scan(crop.image.bitmap.toCappedJpeg(1280, 80)) }
-                },
-            )
-        }
+        showUrlSearch?.let { } // Removed legacy block
+        // Rest of overlays handled below
     }
 }
 
@@ -415,6 +494,7 @@ private fun ErrorPanel(message: String, onDismiss: () -> Unit) {
 @Composable
 private fun SearchOverlay(title: String, placeholder: String, onDismiss: () -> Unit, onSubmit: (String) -> Unit) {
     var text by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
     Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.55f))) {
         Surface(
             modifier = Modifier.align(Alignment.Center).fillMaxWidth().padding(Spacing.lg),
@@ -424,12 +504,31 @@ private fun SearchOverlay(title: String, placeholder: String, onDismiss: () -> U
             Column(Modifier.padding(Spacing.lg)) {
                 Text(title, color = Color.White)
                 Spacer(Modifier.height(Spacing.md))
-                androidx.compose.material3.OutlinedTextField(value = text, onValueChange = { text = it }, placeholder = { Text(placeholder) }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                androidx.compose.material3.OutlinedTextField(
+                    value = text,
+                    onValueChange = {
+                        text = it
+                        error = null
+                    },
+                    placeholder = { Text(placeholder) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    isError = error != null,
+                    supportingText = error?.let { { Text(it, color = Brand.error) } }
+                )
                 Spacer(Modifier.height(Spacing.md))
                 Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
                     Text(modifier = Modifier.clickable { onDismiss() }, text = "Cancel", color = Color.White)
                     Spacer(Modifier.width(Spacing.lg))
-                    Text(modifier = Modifier.clickable { if (text.isNotBlank()) onSubmit(text.trim()) }, text = "Search", color = Brand.accentDark)
+                    Text(modifier = Modifier.clickable {
+                        if (text.isNotBlank()) {
+                            if (text.startsWith("http://") || text.startsWith("https://")) {
+                                onSubmit(text.trim())
+                            } else {
+                                error = "That doesn't look like a link — use the search bar for product names."
+                            }
+                        }
+                    }, text = "Search", color = Brand.accentDark)
                 }
             }
         }
@@ -437,12 +536,18 @@ private fun SearchOverlay(title: String, placeholder: String, onDismiss: () -> U
 }
 
 @Composable
-private fun ResultPanel(product: IdentifyResult, prices: List<ShopItem>, onDismiss: () -> Unit) {
+private fun ResultPanel(product: IdentifyResult, prices: List<ShopItem>, dao: com.melakunet.snapshop.data.SnapShopDao, onDismiss: () -> Unit) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var showAlertDialog by remember { mutableStateOf<ShopItem?>(null) }
+
     Surface(modifier = Modifier.fillMaxSize(), color = Brand.backgroundDark) {
         Column(Modifier.padding(Spacing.lg)) {
             val name = listOf(product.brand, product.model).filter { it.isNotEmpty() }.joinToString(" ").ifEmpty { product.category }
-            Text(name, style = MaterialTheme.typography.headlineMedium, color = Color.White)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(name, style = MaterialTheme.typography.headlineMedium, color = Color.White, modifier = Modifier.weight(1f))
+                Text("Close", color = Brand.accentDark, modifier = Modifier.clickable { onDismiss() })
+            }
             Spacer(Modifier.height(Spacing.lg))
             if (prices.isEmpty()) {
                 Text("No prices to show.", color = Color.White)
@@ -450,15 +555,48 @@ private fun ResultPanel(product: IdentifyResult, prices: List<ShopItem>, onDismi
             } else {
                 LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(Spacing.sm)) {
                     items(prices) { item ->
-                        Surface(shape = RoundedCornerShape(12.dp), color = Brand.surfaceDark, modifier = Modifier.fillMaxWidth().clickable {
-                            runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(item.link))) }
-                        }) {
-                            Row(Modifier.padding(Spacing.md), verticalAlignment = Alignment.CenterVertically) {
-                                Column(Modifier.weight(1f)) {
-                                    Text(item.source, color = Color.White)
-                                    Text(item.delivery, color = Color.White.copy(alpha = 0.7f))
+                        Surface(shape = RoundedCornerShape(12.dp), color = Brand.surfaceDark, modifier = Modifier.fillMaxWidth()) {
+                            Column(Modifier.padding(Spacing.md)) {
+                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clickable {
+                                    runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(item.link))) }
+                                }) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text(item.source, color = Color.White)
+                                        Text(item.delivery, color = Color.White.copy(alpha = 0.7f))
+                                    }
+                                    Text(item.price, color = Brand.accentDark)
                                 }
-                                Text(item.price, color = Brand.accentDark)
+                                Spacer(Modifier.height(Spacing.sm))
+                                Row(horizontalArrangement = Arrangement.spacedBy(Spacing.md)) {
+                                    Button(
+                                        onClick = {
+                                            scope.launch {
+                                                dao.insertSavedItem(SavedItem(
+                                                    productName = name,
+                                                    searchQuery = product.searchQuery,
+                                                    thumbnail = item.thumbnail,
+                                                    savedPrice = item.extractedPrice,
+                                                    savedDate = System.currentTimeMillis(),
+                                                    link = item.link,
+                                                    source = item.source,
+                                                    currentLowestPrice = item.extractedPrice
+                                                ))
+                                                Toast.makeText(context, "Saved!", Toast.LENGTH_SHORT).show()
+                                            }
+                                        },
+                                        modifier = Modifier.weight(1f),
+                                        shape = RoundedCornerShape(8.dp)
+                                    ) {
+                                        Text("Save")
+                                    }
+                                    Button(
+                                        onClick = { showAlertDialog = item },
+                                        modifier = Modifier.weight(1f),
+                                        shape = RoundedCornerShape(8.dp)
+                                    ) {
+                                        Text("Set alert")
+                                    }
+                                }
                             }
                         }
                     }
@@ -466,6 +604,61 @@ private fun ResultPanel(product: IdentifyResult, prices: List<ShopItem>, onDismi
             }
             Spacer(Modifier.height(Spacing.md))
             Button(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("Scan again") }
+        }
+    }
+
+    showAlertDialog?.let { item ->
+        val name = listOf(product.brand, product.model).filter { it.isNotEmpty() }.joinToString(" ").ifEmpty { product.category }
+        PriceAlertDialog(
+            productName = name,
+            currentPrice = item.extractedPrice,
+            onDismiss = { showAlertDialog = null },
+            onConfirm = { targetPrice ->
+                scope.launch {
+                    dao.insertPriceAlert(PriceAlert(
+                        savedItemId = "", // Optional: link to a SavedItem if needed
+                        productName = name,
+                        searchQuery = product.searchQuery,
+                        targetPrice = targetPrice,
+                        createdDate = System.currentTimeMillis(),
+                        lastCheckedDate = System.currentTimeMillis(),
+                        triggered = item.extractedPrice <= targetPrice
+                    ))
+                    showAlertDialog = null
+                    Toast.makeText(context, "Alert set!", Toast.LENGTH_SHORT).show()
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun PriceAlertDialog(productName: String, currentPrice: Double, onDismiss: () -> Unit, onConfirm: (Double) -> Unit) {
+    var text by remember { mutableStateOf(String.format("%.2f", currentPrice * 0.9)) }
+    Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.55f)), contentAlignment = Alignment.Center) {
+        Surface(shape = RoundedCornerShape(24.dp), color = Brand.surfaceDark, modifier = Modifier.padding(Spacing.lg).fillMaxWidth()) {
+            Column(Modifier.padding(Spacing.lg)) {
+                Text("Set Price Alert", style = MaterialTheme.typography.titleMedium, color = Color.White)
+                Spacer(Modifier.height(Spacing.sm))
+                Text("Notify me when $productName drops below:", color = Color.White.copy(alpha = 0.7f))
+                Spacer(Modifier.height(Spacing.md))
+                androidx.compose.material3.OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    prefix = { Text("$") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Decimal)
+                )
+                Spacer(Modifier.height(Spacing.lg))
+                Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
+                    Text("Cancel", color = Color.White, modifier = Modifier.clickable { onDismiss() })
+                    Spacer(Modifier.width(Spacing.xl))
+                    Text("Set Alert", color = Brand.accentDark, modifier = Modifier.clickable {
+                        text.toDoubleOrNull()?.let { onConfirm(it) }
+                    })
+                }
+            }
         }
     }
 }
@@ -476,77 +669,142 @@ private fun AdjustCropScreen(image: CropImage, onCancel: () -> Unit, onScan: (Cr
         mutableStateOf(CropRect(0.15f, 0.2f, 0.85f, 0.8f))
     }
     var boxSize by remember { mutableStateOf(IntSize.Zero) }
-    Box(Modifier.fillMaxSize().background(Brand.backgroundDark)) {
-        AsyncImage(
-            model = ImageRequest.Builder(LocalContext.current).data(image.bitmap).build(),
-            contentDescription = null,
-            modifier = Modifier.fillMaxSize(),
-            contentScale = ContentScale.Fit,
-        )
-        CropOverlay(
-            crop = crop,
-            image = image,
-            boxSize = boxSize,
-            onCropChange = { crop = it },
-            modifier = Modifier.fillMaxSize().onGloballyPositioned { boxSize = it.size },
-        )
-        Row(Modifier.align(Alignment.TopStart).padding(Spacing.lg)) {
-            Text("Cancel", color = Color.White, modifier = Modifier.clickable { onCancel() })
+    val displayRect = remember(image, boxSize) {
+        if (boxSize.width == 0 || boxSize.height == 0) androidx.compose.ui.geometry.Rect.Zero
+        else fitRect(image.bitmap.width, image.bitmap.height, boxSize.width.toFloat(), boxSize.height.toFloat())
+    }
+
+    Box(Modifier.fillMaxSize().background(Brand.backgroundDark).onGloballyPositioned { boxSize = it.size }) {
+        if (boxSize != IntSize.Zero) {
+            AsyncImage(
+                model = ImageRequest.Builder(LocalContext.current).data(image.bitmap).build(),
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Fit,
+            )
+            if (displayRect != androidx.compose.ui.geometry.Rect.Zero) {
+                CropOverlay(
+                    crop = crop,
+                    displayRect = displayRect,
+                    onCropChange = { crop = it },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
         }
-        Row(Modifier.align(Alignment.TopEnd).padding(Spacing.lg)) {
-            Text("Scan", color = Brand.accentDark, modifier = Modifier.clickable { onScan(CropSelection(image, crop)) })
+        
+        // Header
+        Box(Modifier.fillMaxWidth().padding(Spacing.lg)) {
+            Text("Cancel", color = Color.White, modifier = Modifier.align(Alignment.CenterStart).clickable { onCancel() })
+            Text("Adjust Crop", color = Color.White, style = MaterialTheme.typography.titleMedium, modifier = Modifier.align(Alignment.Center))
+            Text("Scan", color = Brand.accentDark, style = MaterialTheme.typography.titleMedium.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.Bold), modifier = Modifier.align(Alignment.CenterEnd).clickable { onScan(CropSelection(image, crop)) })
         }
     }
 }
 
-data class CropRect(val left: Float, val top: Float, val right: Float, val bottom: Float)
-data class CropImage(val uri: Uri, val bitmap: Bitmap, val displayRect: androidx.compose.ui.geometry.Rect)
-data class CropSelection(val image: CropImage, val crop: CropRect)
+private enum class DragMode { NONE, CORNER_TL, CORNER_TR, CORNER_BL, CORNER_BR, EDGE_T, EDGE_B, EDGE_L, EDGE_R, INTERIOR }
 
 @Composable
-private fun CropOverlay(crop: CropRect, image: CropImage, boxSize: IntSize, onCropChange: (CropRect) -> Unit, modifier: Modifier = Modifier) {
-    val handle = 18.dp
-    val rect = crop.toScreenRect(image.displayRect)
-    Box(modifier.pointerInput(crop, image, boxSize) {
+private fun CropOverlay(crop: CropRect, displayRect: androidx.compose.ui.geometry.Rect, onCropChange: (CropRect) -> Unit, modifier: Modifier = Modifier) {
+    val currentCrop by rememberUpdatedState(crop)
+    val currentDisplayRect by rememberUpdatedState(displayRect)
+    val currentOnCropChange by rememberUpdatedState(onCropChange)
+    
+    var dragMode by remember { mutableStateOf(DragMode.NONE) }
+    val handleSize = 18.dp
+    val touchSlop = 48.dp
+
+    Box(modifier.pointerInput(Unit) {
         detectDragGestures(
-            onDrag = { change, drag ->
-                change.consume()
-                val next = when {
-                    rect.cornerPoints().any { it.distanceTo(change.position) <= 44.dp.toPx() } -> crop.dragCorner(image.displayRect, change.position)
-                    rect.contains(change.position) -> crop.dragWhole(image.displayRect, drag)
-                    else -> crop
+            onDragStart = { offset ->
+                val rect = currentCrop.toScreenRect(currentDisplayRect)
+                val tl = Offset(rect.left, rect.top)
+                val tr = Offset(rect.right, rect.top)
+                val bl = Offset(rect.left, rect.bottom)
+                val br = Offset(rect.right, rect.bottom)
+                val slopPx = touchSlop.toPx()
+                
+                dragMode = when {
+                    offset.distanceTo(tl) <= slopPx -> DragMode.CORNER_TL
+                    offset.distanceTo(tr) <= slopPx -> DragMode.CORNER_TR
+                    offset.distanceTo(bl) <= slopPx -> DragMode.CORNER_BL
+                    offset.distanceTo(br) <= slopPx -> DragMode.CORNER_BR
+                    offset.y in (rect.top - slopPx)..(rect.top + slopPx) && offset.x in rect.left..rect.right -> DragMode.EDGE_T
+                    offset.y in (rect.bottom - slopPx)..(rect.bottom + slopPx) && offset.x in rect.left..rect.right -> DragMode.EDGE_B
+                    offset.x in (rect.left - slopPx)..(rect.left + slopPx) && offset.y in rect.top..rect.bottom -> DragMode.EDGE_L
+                    offset.x in (rect.right - slopPx)..(rect.right + slopPx) && offset.y in rect.top..rect.bottom -> DragMode.EDGE_R
+                    rect.contains(offset) -> DragMode.INTERIOR
+                    else -> DragMode.NONE
                 }
-                onCropChange(next.clamp(image.displayRect))
             },
+            onDrag = { change, dragAmount ->
+                if (dragMode != DragMode.NONE) {
+                    change.consume()
+                    val next = currentCrop.handleDrag(currentDisplayRect, dragAmount, dragMode)
+                    currentOnCropChange(next.clamp(currentDisplayRect))
+                }
+            },
+            onDragEnd = { dragMode = DragMode.NONE },
+            onDragCancel = { dragMode = DragMode.NONE }
         )
     }) {
         Canvas(Modifier.fillMaxSize()) {
-            val screen = crop.toScreenRect(image.displayRect)
-            drawRect(Color.Black.copy(alpha = 0.55f))
-            drawRect(Color.Transparent, topLeft = Offset(screen.left, screen.top), size = Size(screen.width, screen.height))
+            val screen = crop.toScreenRect(displayRect)
+            // Dimmed background
+            drawRect(Color.Black.copy(alpha = 0.55f), size = Size(size.width, screen.top)) // Top
+            drawRect(Color.Black.copy(alpha = 0.55f), topLeft = Offset(0f, screen.bottom), size = Size(size.width, size.height - screen.bottom)) // Bottom
+            drawRect(Color.Black.copy(alpha = 0.55f), topLeft = Offset(0f, screen.top), size = Size(screen.left, screen.height)) // Left
+            drawRect(Color.Black.copy(alpha = 0.55f), topLeft = Offset(screen.right, screen.top), size = Size(size.width - screen.right, screen.height)) // Right
+
             drawRect(Color.White, topLeft = Offset(screen.left, screen.top), size = Size(screen.width, screen.height), style = androidx.compose.ui.graphics.drawscope.Stroke(2.dp.toPx()))
+            
             val thirdW = screen.width / 3f
             val thirdH = screen.height / 3f
-            drawLine(Color.White.copy(alpha = 0.45f), Offset(screen.left + thirdW, screen.top), Offset(screen.left + thirdW, screen.bottom), 1.dp.toPx())
-            drawLine(Color.White.copy(alpha = 0.45f), Offset(screen.left + 2 * thirdW, screen.top), Offset(screen.left + 2 * thirdW, screen.bottom), 1.dp.toPx())
-            drawLine(Color.White.copy(alpha = 0.45f), Offset(screen.left, screen.top + thirdH), Offset(screen.right, screen.top + thirdH), 1.dp.toPx())
-            drawLine(Color.White.copy(alpha = 0.45f), Offset(screen.left, screen.top + 2 * thirdH), Offset(screen.right, screen.top + 2 * thirdH), 1.dp.toPx())
+            repeat(2) { i ->
+                val x = screen.left + thirdW * (i + 1)
+                drawLine(Color.White.copy(alpha = 0.45f), Offset(x, screen.top), Offset(x, screen.bottom), 1.dp.toPx())
+                val y = screen.top + thirdH * (i + 1)
+                drawLine(Color.White.copy(alpha = 0.45f), Offset(screen.left, y), Offset(screen.right, y), 1.dp.toPx())
+            }
+            
             screen.cornerPoints().forEach { center ->
-                drawCircle(Color.White, handle.toPx() / 2, center)
+                drawCircle(Color.White, handleSize.toPx() / 2, center)
             }
         }
     }
 }
 
-private fun runScan(scope: kotlinx.coroutines.CoroutineScope, stateSetter: (ScanState) -> Unit, label: String, block: suspend () -> Pair<IdentifyResult, List<ShopItem>>) {
+private fun CropRect.handleDrag(displayRect: androidx.compose.ui.geometry.Rect, drag: Offset, mode: DragMode): CropRect {
+    val dx = drag.x / displayRect.width
+    val dy = drag.y / displayRect.height
+    return when (mode) {
+        DragMode.CORNER_TL -> CropRect(left + dx, top + dy, right, bottom)
+        DragMode.CORNER_TR -> CropRect(left, top + dy, right + dx, bottom)
+        DragMode.CORNER_BL -> CropRect(left + dx, top, right, bottom + dy)
+        DragMode.CORNER_BR -> CropRect(left, top, right + dx, bottom + dy)
+        DragMode.EDGE_T -> CropRect(left, top + dy, right, bottom)
+        DragMode.EDGE_B -> CropRect(left, top, right, bottom + dy)
+        DragMode.EDGE_L -> CropRect(left + dx, top, right, bottom)
+        DragMode.EDGE_R -> CropRect(left, top, right + dx, bottom)
+        DragMode.INTERIOR -> CropRect(left + dx, top + dy, right + dx, bottom + dy)
+        else -> this
+    }
+}
+
+private fun runScan(scope: kotlinx.coroutines.CoroutineScope, stateSetter: (ScanState) -> Unit, label: String, quotaManager: QuotaManager? = null, block: suspend () -> Pair<IdentifyResult, List<ShopItem>>) {
     stateSetter(ScanState.Sending(label))
     scope.launch {
         stateSetter(
             try {
                 val (product, prices) = block()
+                quotaManager?.consumeQuota()
                 ScanState.Done(product, prices)
             } catch (e: Exception) {
-                ScanState.Error(e.message ?: "Something went wrong")
+                if (e is java.io.IOException) {
+                    android.util.Log.e("BackendClient", "Connection failure", e)
+                    ScanState.Error("Can't reach the server — check your connection")
+                } else {
+                    ScanState.Error(e.message ?: "Something went wrong")
+                }
             },
         )
     }
@@ -561,23 +819,36 @@ private suspend fun extractKeyframes(file: File, count: Int = 8): List<ByteArray
         val stepMs = durationMs / count
         (0 until count).mapNotNull { i ->
             val timeUs = (stepMs * i + stepMs / 2) * 1000
-            mmr.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)?.toCappedJpeg(512)
+            mmr.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)?.let { toCappedJpeg(it, 512) }
         }.ifEmpty { throw IllegalStateException("Could not extract frames from the video.") }
     } finally {
         runCatching { mmr.release() }
     }
 }
 
-private fun Bitmap.toCappedJpeg(maxSide: Int, quality: Int = 80): ByteArray {
-    var bitmap = this
-    val longest = maxOf(bitmap.width, bitmap.height)
+private fun toCappedJpeg(bitmap: Bitmap, maxSide: Int, quality: Int = 80): ByteArray {
+    var b = bitmap
+    val longest = maxOf(b.width, b.height)
     if (longest > maxSide) {
         val scale = maxSide.toFloat() / longest
-        bitmap = Bitmap.createScaledBitmap(bitmap, (bitmap.width * scale).toInt(), (bitmap.height * scale).toInt(), true)
+        b = Bitmap.createScaledBitmap(b, (b.width * scale).toInt(), (b.height * scale).toInt(), true)
     }
     val out = ByteArrayOutputStream()
-    bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
+    b.compress(Bitmap.CompressFormat.JPEG, quality, out)
     return out.toByteArray()
+}
+
+private fun Bitmap.cropImage(rect: CropRect): Bitmap {
+    val l = (rect.left * width).toInt().coerceIn(0, width - 1)
+    val t = (rect.top * height).toInt().coerceIn(0, height - 1)
+    val r = (rect.right * width).toInt().coerceIn(l + 1, width)
+    val b = (rect.bottom * height).toInt().coerceIn(t + 1, height)
+    return Bitmap.createBitmap(this, l, t, r - l, b - t)
+}
+
+private fun toCappedJpeg(data: ByteArray, maxSide: Int, quality: Int = 80): ByteArray {
+    val bitmap = BitmapFactory.decodeByteArray(data, 0, data.size) ?: return data
+    return toCappedJpeg(bitmap, maxSide, quality)
 }
 
 private suspend fun android.content.Context.loadCropImage(uri: Uri): CropImage = withContext(Dispatchers.IO) {
@@ -598,8 +869,7 @@ private suspend fun android.content.Context.loadCropImage(uri: Uri): CropImage =
             BitmapFactory.decodeStream(input) ?: error("Could not decode image")
         }
     }.rotateIfNeeded(uri)
-    val display = fitRect(bitmap.width, bitmap.height, bitmap.width.toFloat(), bitmap.height.toFloat())
-    CropImage(uri, bitmap, display)
+    CropImage(uri, bitmap)
 }
 
 private fun Bitmap.rotateIfNeeded(uri: Uri): Bitmap = this
@@ -626,7 +896,7 @@ private fun capturePhoto(imageCapture: ImageCapture, executor: java.util.concurr
                     val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
                     bitmap = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
                 }
-                onResult(bitmap.toCappedJpeg(1280, 80), null)
+                onResult(toCappedJpeg(bitmap, 1280, 80), null)
             } catch (e: Exception) {
                 onResult(null, e.message)
             } finally {

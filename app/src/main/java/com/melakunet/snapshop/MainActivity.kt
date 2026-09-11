@@ -33,6 +33,7 @@ import com.melakunet.snapshop.ui.alerts.AlertsScreen
 import com.melakunet.snapshop.ui.camera.CameraScreen
 import com.melakunet.snapshop.ui.history.HistoryScreen
 import com.melakunet.snapshop.ui.onboarding.OnboardingScreen
+import com.melakunet.snapshop.ui.onboarding.SignInScreen
 import com.melakunet.snapshop.ui.saved.SavedScreen
 import com.melakunet.snapshop.ui.settings.SettingsScreen
 import com.melakunet.snapshop.ui.theme.SnapShopTheme
@@ -56,6 +57,9 @@ private fun AppRoot() {
     var seenOnboarding by remember {
         mutableStateOf(prefs.getBoolean("hasSeenOnboarding", false))
     }
+    var hasSignedIn by remember {
+        mutableStateOf(prefs.getBoolean("hasSignedIn", false))
+    }
 
     if (!seenOnboarding) {
         OnboardingScreen(
@@ -63,6 +67,13 @@ private fun AppRoot() {
                 prefs.edit().putBoolean("hasSeenOnboarding", true).apply()
                 seenOnboarding = true
             },
+        )
+    } else if (!hasSignedIn) {
+        SignInScreen(
+            onSignedIn = {
+                prefs.edit().putBoolean("hasSignedIn", true).apply()
+                hasSignedIn = true
+            }
         )
     } else {
         SnapShopRoot()

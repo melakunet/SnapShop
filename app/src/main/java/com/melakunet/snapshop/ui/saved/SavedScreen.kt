@@ -1,6 +1,9 @@
 package com.melakunet.snapshop.ui.saved
 
+import android.text.format.DateUtils
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -15,71 +18,119 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.Bookmark
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import com.melakunet.snapshop.models.SampleData
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import com.melakunet.snapshop.SnapShopApplication
+import com.melakunet.snapshop.data.SavedItem
 import com.melakunet.snapshop.ui.theme.Brand
 import com.melakunet.snapshop.ui.theme.Radius
 import com.melakunet.snapshop.ui.theme.Spacing
+import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SavedScreen() {
+    val context = LocalContext.current
+    val dao = (context.applicationContext as SnapShopApplication).database.dao()
+    val scope = rememberCoroutineScope()
+    val items by dao.getAllSavedItems().collectAsState(initial = emptyList())
+
     Column(Modifier.fillMaxSize().padding(Spacing.lg)) {
         Text("Saved", style = MaterialTheme.typography.headlineLarge)
         Spacer(Modifier.height(Spacing.lg))
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(Spacing.sm)) {
-            items(SampleData.saved) { item ->
-                val dropped = item.currentPrice < item.savedPrice
-                Surface(
-                    shape = RoundedCornerShape(Radius.md),
-                    color = MaterialTheme.colorScheme.surface,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Row(
-                        Modifier.padding(Spacing.md),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(
-                            Icons.Filled.Bookmark,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                        )
-                        Spacer(Modifier.size(Spacing.md))
-                        Column(Modifier.weight(1f)) {
-                            Text(item.productName, style = MaterialTheme.typography.titleMedium)
-                            Text(
-                                item.source + "  ·  saved " + item.savedDate,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
+        if (items.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("No saved items", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        } else {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+                items(items, key = { it.id }) { item ->
+                    val dismissState = rememberSwipeToDismissBoxState(
+                        confirmValueChange = {
+                            if (it == SwipeToDismissBoxValue.EndToStart) {
+                                scope.launch { dao.deleteSavedItem(item) }
+                                true
+                            } else false
                         }
-                        Column(horizontalAlignment = Alignment.End) {
-                            Text(
-                                "$" + String.format("%.2f", item.currentPrice),
-                                style = MaterialTheme.typography.titleMedium,
-                                color = if (dropped) Brand.success else MaterialTheme.colorScheme.onSurface,
-                            )
-                            if (dropped) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(
-                                        Icons.Filled.ArrowDownward,
-                                        contentDescription = null,
-                                        tint = Brand.success,
-                                        modifier = Modifier.size(Spacing.md),
-                                    )
-                                    Text(
-                                        "was $" + String.format("%.2f", item.savedPrice),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = Brand.success,
-                                    )
-                                }
+                    )
+
+                    SwipeToDismissBox(
+                        state = dismissState,
+                        enableDismissFromStartToEnd = false,
+                        backgroundContent = {
+                            val color = if (dismissState.dismissDirection == SwipeToDismissBoxValue.EndToStart) Brand.error else Color.Transparent
+                            Box(
+                                Modifier.fillMaxSize().clip(RoundedCornerShape(Radius.md)).background(color).padding(horizontal = Spacing.lg),
+                                contentAlignment = Alignment.CenterEnd
+                            ) {
+                                Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color.White)
                             }
+                        },
+                        content = {
+                            SavedRow(item)
                         }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SavedRow(item: SavedItem) {
+    val dropped = item.currentLowestPrice < item.savedPrice
+    Surface(
+        shape = RoundedCornerShape(Radius.md),
+        color = MaterialTheme.colorScheme.surface,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            Modifier.padding(Spacing.md),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.Filled.Bookmark,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+            )
+            Spacer(Modifier.size(Spacing.md))
+            Column(Modifier.weight(1f)) {
+                Text(item.productName, style = MaterialTheme.typography.titleMedium)
+                Text(
+                    item.source + "  ·  saved " + DateUtils.getRelativeTimeSpanString(item.savedDate),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Column(horizontalAlignment = Alignment.End) {
+                Text(
+                    "$" + String.format("%.2f", item.currentLowestPrice),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = if (dropped) Brand.success else MaterialTheme.colorScheme.onSurface,
+                )
+                if (dropped) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Filled.ArrowDownward,
+                            contentDescription = null,
+                            tint = Brand.success,
+                            modifier = Modifier.size(Spacing.md),
+                        )
+                        Text(
+                            "was $" + String.format("%.2f", item.savedPrice),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Brand.success,
+                        )
                     }
                 }
             }

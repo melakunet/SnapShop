@@ -16,13 +16,13 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0.0"
-        buildConfigField("String", "BACKEND_URL", "\"http://192.168.2.12:8787\"")
+        buildConfigField("String", "BACKEND_URL", "\"https://snap-shop-api-dev.etefmelaku.workers.dev\"")
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
-            buildConfigField("String", "BACKEND_URL", "\"https://YOUR-PROD-WORKER.workers.dev\"")
+            buildConfigField("String", "BACKEND_URL", "\"https://snap-shop-api-dev.etefmelaku.workers.dev\"")
         }
     }
     compileOptions {
