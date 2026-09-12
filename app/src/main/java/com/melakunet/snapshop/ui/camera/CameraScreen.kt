@@ -31,30 +31,13 @@ import androidx.camera.video.Recording
 import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
-import androidx.camera.core.ImageAnalysis
-import com.google.mlkit.vision.barcode.BarcodeScannerOptions
-import com.google.mlkit.vision.barcode.BarcodeScanning
-import com.google.mlkit.vision.barcode.common.Barcode
-import com.google.mlkit.vision.common.InputImage
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.*
 import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -65,27 +48,18 @@ import androidx.compose.material.icons.filled.KeyboardVoice
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Videocam
-import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
-import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -120,6 +94,13 @@ import java.io.File
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import androidx.camera.core.ImageAnalysis
+import com.google.mlkit.vision.barcode.BarcodeScannerOptions
+import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.common.InputImage
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 
 data class CropRect(val left: Float, val top: Float, val right: Float, val bottom: Float)
 data class CropImage(val uri: Uri, val bitmap: Bitmap, val displayRect: androidx.compose.ui.geometry.Rect = androidx.compose.ui.geometry.Rect.Zero)
@@ -130,6 +111,7 @@ private enum class ScanMode { PRECISION, DEEP }
 private sealed interface ScanState {
     data object Idle : ScanState
     data object Recording : ScanState
+    data class Reviewing(val frames: List<ByteArray>) : ScanState
     data class Cropping(val image: CropImage, val originMode: String = "Crop") : ScanState
     data class Sending(val label: String) : ScanState
     data class Done(val product: IdentifyResult, val prices: List<ShopItem>, val thumbnail: ByteArray?, val modeLabel: String) : ScanState
@@ -214,7 +196,7 @@ fun CameraScreen() {
                                     }
                                     if (quotaManager.canScan()) {
                                         runScan(scope, { state = it }, "Identifying...", "Barcode Scan", quotaManager) {
-                                            val result = BackendClient.scan(ByteArray(0), first) // Empty image, just barcode
+                                            val result = BackendClient.scan(ByteArray(0), first) 
                                             val product = result.first
                                             val prices = result.second
                                             val name = listOf(product.brand, product.model).filter { it.isNotEmpty() }.joinToString(" ").ifEmpty { product.category }
@@ -248,21 +230,27 @@ fun CameraScreen() {
             state = ScanState.Cropping(cropImage)
         }
     }
-        val videoPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-            if (uri != null) {
-                if (!quotaManager.canScan()) {
-                    showPaywall = true
-                } else {
-                    runScan(scope, { state = it }, "Analyzing video...", "Deep Scan", quotaManager) {
-                        val file = context.copyUriToCache(uri, "picked_video") ?: throw IllegalStateException("Could not open video")
-                        val frames = extractKeyframes(file)
-                        val product = BackendClient.identifyDeep(frames)
-                        val prices = product.searchQuery.trim().takeIf { it.isNotEmpty() }?.let { BackendClient.shop(it) } ?: emptyList()
-                        Triple(product, prices, frames.firstOrNull())
+    val videoPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) {
+            if (!quotaManager.canScan()) {
+                showPaywall = true
+            } else {
+                runScan(scope, { state = it }, "Analyzing video...", "Deep Scan", quotaManager) {
+                    val file = context.copyUriToCache(uri, "picked_video") ?: throw IllegalStateException("Could not open video")
+                    val frames = extractKeyframes(file)
+                    val product = BackendClient.identifyDeep(frames)
+                    val prices = if (product.searchQuery.isBlank()) emptyList() else {
+                        try {
+                            BackendClient.shop(product.searchQuery)
+                        } catch (e: Exception) {
+                            emptyList()
+                        }
                     }
+                    Triple(product, prices, frames.firstOrNull())
                 }
             }
         }
+    }
 
     androidx.compose.runtime.DisposableEffect(Unit) {
         onDispose {
@@ -271,7 +259,40 @@ fun CameraScreen() {
     }
 
     Box(Modifier.fillMaxSize().background(Brand.backgroundDark)) {
-        if (state is ScanState.Cropping) {
+        if (state is ScanState.Reviewing) {
+            val frames = (state as ScanState.Reviewing).frames
+            ReviewFramesScreen(
+                frames = frames,
+                onCancel = { state = ScanState.Idle },
+                onCropAndScan = { frame ->
+                    val bitmap = BitmapFactory.decodeByteArray(frame, 0, frame.size)
+                    state = ScanState.Cropping(CropImage(Uri.EMPTY, bitmap), "Deep")
+                },
+                onScanFullVideo = {
+                    runScan(scope, { state = it }, "Analyzing video...", "Deep Scan", quotaManager) {
+                        val product = BackendClient.identifyDeep(frames)
+                        val prices = if (product.searchQuery.isBlank()) emptyList() else {
+                            try {
+                                BackendClient.shop(product.searchQuery)
+                            } catch (e: Exception) {
+                                emptyList()
+                            }
+                        }
+                        val name = listOf(product.brand, product.model).filter { it.isNotEmpty() }.joinToString(" ").ifEmpty { product.category }
+                        val thumb = frames.firstOrNull()
+                        dao.insertScanRecord(ScanRecord(
+                            date = System.currentTimeMillis(),
+                            productName = name,
+                            mode = "Deep",
+                            thumbnail = thumb,
+                            lowestPrice = prices.minOfOrNull { it.extractedPrice } ?: 0.0,
+                            searchQuery = product.searchQuery
+                        ))
+                        Triple(product, prices, thumb)
+                    }
+                }
+            )
+        } else if (state is ScanState.Cropping) {
             val croppingState = state as ScanState.Cropping
             val croppingImage = croppingState.image
             AdjustCropScreen(
@@ -402,23 +423,20 @@ fun CameraScreen() {
                                     val rec = videoCapture.output.prepareRecording(context, FileOutputOptions.Builder(file).build()).start(ContextCompat.getMainExecutor(context)) { event ->
                                         if (event is VideoRecordEvent.Finalize) {
                                             recording = null
-                                            if (event.hasError()) state = ScanState.Error("Recording failed (" + event.error + ")")
-                                            else runScan(scope, { state = it }, "Analyzing video...", "Deep Scan", quotaManager) {
-                                            val frames = extractKeyframes(file)
-                                            val product = BackendClient.identifyDeep(frames)
-                                            val prices = product.searchQuery.trim().takeIf { it.isNotEmpty() }?.let { BackendClient.shop(it) } ?: emptyList()
-                                            val name = listOf(product.brand, product.model).filter { it.isNotEmpty() }.joinToString(" ").ifEmpty { product.category }
-                                            val thumb = frames.firstOrNull()?.let { toCappedJpeg(it, 200, 70) }
-                                            dao.insertScanRecord(ScanRecord(
-                                                date = System.currentTimeMillis(),
-                                                productName = name,
-                                                mode = "Deep",
-                                                thumbnail = thumb,
-                                                lowestPrice = prices.minOfOrNull { it.extractedPrice } ?: 0.0,
-                                                searchQuery = product.searchQuery
-                                            ))
-                                            Triple(product, prices, thumb)
-                                        }
+                                            if (event.hasError()) {
+                                                state = ScanState.Error("Recording failed (" + event.error + ")")
+                                            } else {
+                                                scope.launch {
+                                                    try {
+                                                        val frames = extractKeyframes(file)
+                                                        state = ScanState.Reviewing(frames)
+                                                    } catch (e: Exception) {
+                                                        state = ScanState.Error(e.message ?: "Frame extraction failed")
+                                                    } finally {
+                                                        file.delete()
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                     recording = rec
@@ -669,6 +687,117 @@ private fun AdjustCropScreen(image: CropImage, onCancel: () -> Unit, onScan: (Cr
     }
 }
 
+@Composable
+private fun ReviewFramesScreen(
+    frames: List<ByteArray>,
+    onCancel: () -> Unit,
+    onCropAndScan: (ByteArray) -> Unit,
+    onScanFullVideo: () -> Unit
+) {
+    var selectedIndex by remember { mutableIntStateOf(0) }
+    val selectedFrame = frames[selectedIndex]
+
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = Brand.backgroundDark
+    ) {
+        Column(Modifier.fillMaxSize()) {
+            // Header
+            Box(Modifier.fillMaxWidth().padding(Spacing.lg)) {
+                Text(
+                    "Cancel",
+                    color = Color.White,
+                    modifier = Modifier.align(Alignment.CenterStart).clickable { onCancel() }
+                )
+                Text(
+                    "Choose the best frame",
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.align(Alignment.Center)
+                )
+            }
+
+            // Preview
+            Box(
+                Modifier.weight(1f).fillMaxWidth().padding(horizontal = Spacing.lg),
+                contentAlignment = Alignment.Center
+            ) {
+                val bitmap = remember(selectedFrame) {
+                    BitmapFactory.decodeByteArray(selectedFrame, 0, selectedFrame.size)
+                }
+                bitmap?.let {
+                    Image(
+                        bitmap = it.asImageBitmap(),
+                        contentDescription = null,
+                        modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)),
+                        contentScale = ContentScale.Fit
+                    )
+                }
+            }
+
+            // Thumbnails
+            LazyRow(
+                modifier = Modifier.fillMaxWidth().padding(vertical = Spacing.xl),
+                contentPadding = PaddingValues(horizontal = Spacing.lg),
+                horizontalArrangement = Arrangement.spacedBy(Spacing.md)
+            ) {
+                itemsIndexed(frames) { index, frame ->
+                    val bitmap = remember(frame) {
+                        BitmapFactory.decodeByteArray(frame, 0, frame.size)
+                    }
+                    Box(
+                        modifier = Modifier
+                            .size(72.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .border(
+                                width = 2.dp,
+                                color = if (selectedIndex == index) Brand.scanDeep else Color.Transparent,
+                                shape = RoundedCornerShape(8.dp)
+                            )
+                            .clickable { selectedIndex = index }
+                    ) {
+                        bitmap?.let {
+                            Image(
+                                bitmap = it.asImageBitmap(),
+                                contentDescription = null,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Actions
+            Column(
+                Modifier.padding(Spacing.lg),
+                verticalArrangement = Arrangement.spacedBy(Spacing.md)
+            ) {
+                Button(
+                    onClick = { onCropAndScan(selectedFrame) },
+                    modifier = Modifier.fillMaxWidth().height(56.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Brand.scanDeep,
+                        contentColor = Color.White
+                    ),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text("Crop & Scan", fontWeight = FontWeight.Bold)
+                }
+
+                OutlinedButton(
+                    onClick = onScanFullVideo,
+                    modifier = Modifier.fillMaxWidth().height(56.dp),
+                    border = BorderStroke(1.dp, Brand.scanDeep),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text("Scan full video", color = Brand.scanDeep)
+                }
+            }
+        }
+    }
+}
+
 private enum class DragMode { NONE, CORNER_TL, CORNER_TR, CORNER_BL, CORNER_BR, EDGE_T, EDGE_B, EDGE_L, EDGE_R, INTERIOR }
 
 @Composable
@@ -785,7 +914,7 @@ private fun runScan(
     }
 }
 
-private suspend fun extractKeyframes(file: File, count: Int = 8): List<ByteArray> = withContext(Dispatchers.IO) {
+private suspend fun extractKeyframes(file: File, count: Int = 5): List<ByteArray> = withContext(Dispatchers.IO) {
     val mmr = MediaMetadataRetriever()
     try {
         mmr.setDataSource(file.path)
@@ -794,7 +923,7 @@ private suspend fun extractKeyframes(file: File, count: Int = 8): List<ByteArray
         val stepMs = durationMs / count
         (0 until count).mapNotNull { i ->
             val timeUs = (stepMs * i + stepMs / 2) * 1000
-            mmr.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)?.let { toCappedJpeg(it, 512) }
+            mmr.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)?.let { toCappedJpeg(it, 384, 50) }
         }.ifEmpty { throw IllegalStateException("Could not extract frames from the video.") }
     } finally {
         runCatching { mmr.release() }
@@ -940,8 +1069,8 @@ private fun CropRect.dragCorner(displayRect: androidx.compose.ui.geometry.Rect, 
     val corners = listOf(
         Offset(displayRect.left, displayRect.top),
         Offset(displayRect.right, displayRect.top),
-        Offset(displayRect.left, displayRect.bottom),
-        Offset(displayRect.right, displayRect.bottom),
+        Offset(displayRect.left, bottom),
+        Offset(displayRect.right, bottom),
     )
     val nearest = corners.minByOrNull { it.distanceTo(position) } ?: corners.first()
     return when (nearest) {

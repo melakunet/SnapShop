@@ -55,6 +55,11 @@ object BackendClient {
         .readTimeout(60, TimeUnit.SECONDS)
         .build()
 
+    private val longPollingClient = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(180, TimeUnit.SECONDS)
+        .build()
+
     private val jpeg = "image/jpeg".toMediaType()
     private val jsonMedia = "application/json".toMediaType()
 
@@ -78,7 +83,7 @@ object BackendClient {
         return execute("/shop", "POST", payload.toRequestBody(jsonMedia))
     }
 
-    /** Full precision scan. Returns (product, emptyList()) when shopping is suppressed. */
+    /** Full precision scan. Returns (product, emptyList()) when shopping is suppressed or fails. */
     suspend fun scan(
         imageBytes: ByteArray,
         barcode: String? = null,
@@ -87,7 +92,13 @@ object BackendClient {
         val product = identifyPrecision(imageBytes, barcode)
         val query = product.searchQuery.trim()
         if (query.isEmpty()) return product to emptyList()
-        return product to shop(query, whitelist)
+        val prices = try {
+            shop(query, whitelist)
+        } catch (e: Exception) {
+            android.util.Log.e("BackendClient", "Soft-failure on shop() during scan", e)
+            emptyList()
+        }
+        return product to prices
     }
 
     suspend fun identifyDeep(frames: List<ByteArray>, hint: String? = null): IdentifyResult {
@@ -97,7 +108,7 @@ object BackendClient {
             }
             if (!hint.isNullOrEmpty()) addFormDataPart("hint", hint)
         }.build()
-        return execute("/identify/deep", "POST", body)
+        return call(authorizedRequest(baseUrl + "/identify/deep", "POST", body), longPollingClient)
     }
 
     suspend fun identifyUrl(
@@ -107,7 +118,14 @@ object BackendClient {
         val payload = json.encodeToString(UrlIdentifyBody.serializer(), UrlIdentifyBody(url))
         val product: IdentifyResult = execute("/identify/url", "POST", payload.toRequestBody(jsonMedia))
         val prices = if (product.searchQuery.isBlank()) emptyList()
-        else shop(product.searchQuery, whitelist)
+        else {
+            try {
+                shop(product.searchQuery, whitelist)
+            } catch (e: Exception) {
+                android.util.Log.e("BackendClient", "Soft-failure on shop() during identifyUrl", e)
+                emptyList()
+            }
+        }
         return product to prices
     }
 
@@ -132,10 +150,10 @@ object BackendClient {
     }
 
     private suspend inline fun <reified T> execute(path: String, method: String, body: RequestBody?): T =
-        call(authorizedRequest(baseUrl + path, method, body))
+        call(authorizedRequest(baseUrl + path, method, body), client)
 
-    private suspend inline fun <reified T> call(request: Request): T = withContext(Dispatchers.IO) {
-        val response = client.newCall(request).await()
+    private suspend inline fun <reified T> call(request: Request, okHttpClient: OkHttpClient = client): T = withContext(Dispatchers.IO) {
+        val response = okHttpClient.newCall(request).await()
         response.use {
             val bytes = it.body?.string() ?: ""
             checkHttp(it.code, bytes)
