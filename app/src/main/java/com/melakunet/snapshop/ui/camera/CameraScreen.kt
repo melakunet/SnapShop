@@ -31,6 +31,13 @@ import androidx.camera.video.Recording
 import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
+import androidx.camera.core.ImageAnalysis
+import com.google.mlkit.vision.barcode.BarcodeScannerOptions
+import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.common.InputImage
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -156,6 +163,7 @@ fun CameraScreen() {
     }
 
     val lifecycleOwner = LocalLifecycleOwner.current
+    val haptic = LocalHapticFeedback.current
     val quotaManager = remember { QuotaManager(context) }
     val scope = rememberCoroutineScope()
     var state by remember { mutableStateOf<ScanState>(ScanState.Idle) }
@@ -165,12 +173,72 @@ fun CameraScreen() {
     var showPaywall by remember { mutableStateOf(false) }
     var recording by remember { mutableStateOf<Recording?>(null) }
     var captureInFlight by remember { mutableStateOf(false) }
+    
+    var lastBarcode by remember { mutableStateOf<String?>(null) }
 
     val imageCapture = remember { ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY).build() }
     val videoCapture = remember {
         VideoCapture.withOutput(
             Recorder.Builder().setQualitySelector(QualitySelector.from(Quality.HD)).build(),
         )
+    }
+    
+    val barcodeScanner = remember {
+        BarcodeScanning.getClient(
+            BarcodeScannerOptions.Builder()
+                .setBarcodeFormats(Barcode.FORMAT_UPC_A, Barcode.FORMAT_UPC_E, Barcode.FORMAT_EAN_13, Barcode.FORMAT_EAN_8, Barcode.FORMAT_CODE_128, Barcode.FORMAT_QR_CODE)
+                .build()
+        )
+    }
+
+    val imageAnalysis = remember {
+        ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .build()
+            .apply {
+                setAnalyzer(ContextCompat.getMainExecutor(context)) { proxy ->
+                    if (state != ScanState.Idle || mode != ScanMode.PRECISION) {
+                        proxy.close()
+                        return@setAnalyzer
+                    }
+                    val image = proxy.image
+                    if (image != null) {
+                        val inputImage = InputImage.fromMediaImage(image, proxy.imageInfo.rotationDegrees)
+                        barcodeScanner.process(inputImage)
+                            .addOnSuccessListener { barcodes ->
+                                val first = barcodes.firstOrNull()?.rawValue
+                                if (first != null && first != lastBarcode) {
+                                    lastBarcode = first
+                                    if (prefs.getBoolean("hapticFeedback", true)) {
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    }
+                                    if (quotaManager.canScan()) {
+                                        runScan(scope, { state = it }, "Identifying...", "Barcode Scan", quotaManager) {
+                                            val result = BackendClient.scan(ByteArray(0), first) // Empty image, just barcode
+                                            val product = result.first
+                                            val prices = result.second
+                                            val name = listOf(product.brand, product.model).filter { it.isNotEmpty() }.joinToString(" ").ifEmpty { product.category }
+                                            dao.insertScanRecord(ScanRecord(
+                                                date = System.currentTimeMillis(),
+                                                productName = name,
+                                                mode = "Barcode",
+                                                thumbnail = null,
+                                                lowestPrice = prices.minOfOrNull { it.extractedPrice } ?: 0.0,
+                                                searchQuery = product.searchQuery
+                                            ))
+                                            Triple(product, prices, null)
+                                        }
+                                    } else {
+                                        showPaywall = true
+                                    }
+                                }
+                            }
+                            .addOnCompleteListener { proxy.close() }
+                    } else {
+                        proxy.close()
+                    }
+                }
+            }
     }
 
     val photoPickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
@@ -251,7 +319,7 @@ fun CameraScreen() {
                         val provider = future.get()
                         val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
                         provider.unbindAll()
-                        provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture, videoCapture)
+                        provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture, videoCapture, imageAnalysis)
                     }, ContextCompat.getMainExecutor(ctx))
                     previewView
                 },
@@ -322,6 +390,9 @@ fun CameraScreen() {
                                     if (bitmap == null) {
                                         state = ScanState.Error(err ?: "Capture failed")
                                     } else {
+                                        if (prefs.getBoolean("hapticFeedback", true)) {
+                                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        }
                                         state = ScanState.Cropping(CropImage(Uri.EMPTY, bitmap), "Precision")
                                     }
                                 }

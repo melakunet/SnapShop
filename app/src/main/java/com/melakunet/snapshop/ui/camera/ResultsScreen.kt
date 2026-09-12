@@ -22,8 +22,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -60,11 +62,8 @@ fun ResultPanel(
             prices.sortedByDescending { item ->
                 val rating = item.rating ?: 0.0
                 val count = item.reviewCount ?: 0
-                // Bayesian average: (rating * count + prior * weight) / (count + weight)
-                // Prior 3.5, Weight 20
                 (rating * count + 3.5 * 20) / (count + 20)
             }.let { list ->
-                // Move unrated items to last
                 val (rated, unrated) = list.partition { it.rating != null }
                 rated + unrated
             }
@@ -83,6 +82,12 @@ fun ResultPanel(
                 ) {
                     item {
                         ScanHeaderCard(product, thumbnail, modeLabel, dao)
+                    }
+
+                    if (product.confidence < 0.7 && modeLabel.contains("Precision", true)) {
+                        item {
+                            ConfidenceEscalationBanner(onSwitchToDeep = onDismiss)
+                        }
                     }
                     
                     item {
@@ -125,6 +130,31 @@ fun ResultPanel(
 }
 
 @Composable
+private fun ConfidenceEscalationBanner(onSwitchToDeep: () -> Unit) {
+    Surface(
+        color = Brand.accentDark.copy(alpha = 0.1f),
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, Brand.accentDark.copy(alpha = 0.2f)),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            Modifier.padding(Spacing.md),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(Icons.Default.Help, null, tint = Brand.accentDark)
+            Spacer(Modifier.width(Spacing.md))
+            Column(Modifier.weight(1f)) {
+                Text("Not sure?", style = MaterialTheme.typography.titleSmall, color = Color.White)
+                Text("Precision confidence is low. Try a Deep Scan for better results.", style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.7f))
+            }
+            TextButton(onClick = onSwitchToDeep) {
+                Text("Deep Scan", color = Brand.accentDark, fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
+@Composable
 private fun ResultsHeader(onDismiss: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = Spacing.lg, vertical = Spacing.md),
@@ -143,6 +173,7 @@ private fun ResultsHeader(onDismiss: () -> Unit) {
 private fun ScanHeaderCard(product: IdentifyResult, thumbnail: ByteArray?, modeLabel: String, dao: SnapShopDao) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val haptic = LocalHapticFeedback.current
     val name = listOf(product.brand, product.model).filter { it.isNotEmpty() }.joinToString(" ").ifEmpty { product.category }
 
     Surface(
@@ -186,6 +217,10 @@ private fun ScanHeaderCard(product: IdentifyResult, thumbnail: ByteArray?, modeL
             
             IconButton(onClick = {
                 scope.launch {
+                    val prefs = context.getSharedPreferences("snapshop", 0)
+                    if (prefs.getBoolean("hapticFeedback", true)) {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    }
                     dao.insertSavedItem(SavedItem(
                         productName = name,
                         searchQuery = product.searchQuery,
@@ -321,6 +356,7 @@ private fun ItemDetailScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val haptic = LocalHapticFeedback.current
     var reviews by remember { mutableStateOf<ProductReviews?>(null) }
     var loadingReviews by remember { mutableStateOf(false) }
 
@@ -346,6 +382,10 @@ private fun ItemDetailScreen(
                 
                 IconButton(onClick = {
                     scope.launch {
+                        val prefs = context.getSharedPreferences("snapshop", 0)
+                        if (prefs.getBoolean("hapticFeedback", true)) {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        }
                         dao.insertSavedItem(SavedItem(
                             productName = item.title ?: product.brand,
                             searchQuery = product.searchQuery,
@@ -398,6 +438,13 @@ private fun ItemDetailScreen(
                 } else if (reviews != null) {
                     RatingBreakdownCard(reviews!!)
                 }
+
+                product.plant?.let { plant ->
+                    if (plant.warning != null) {
+                        Spacer(Modifier.height(Spacing.lg))
+                        PoisonControlRow(plant.warning.level)
+                    }
+                }
                 
                 Spacer(Modifier.height(Spacing.xxl))
                 
@@ -412,6 +459,8 @@ private fun ItemDetailScreen(
                     }
 
                     var showPriceAlert by remember { mutableStateOf(false) }
+                    val prefs = remember { context.getSharedPreferences("snapshop", 0) }
+
                     OutlinedButton(
                         onClick = { showPriceAlert = true },
                         modifier = Modifier.height(56.dp),
@@ -428,8 +477,11 @@ private fun ItemDetailScreen(
                             onDismiss = { showPriceAlert = false },
                             onConfirm = { targetPrice ->
                                 scope.launch {
-                                    dao.insertPriceAlert(PriceAlert(
-                                        savedItemId = "",
+                                    if (prefs.getBoolean("hapticFeedback", true)) {
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    }
+                    dao.insertPriceAlert(PriceAlert(
+                                        savedItemId = item.productId ?: "", // Best effort link
                                         productName = item.title ?: product.brand,
                                         searchQuery = product.searchQuery,
                                         targetPrice = targetPrice,
@@ -447,6 +499,34 @@ private fun ItemDetailScreen(
                 
                 Spacer(Modifier.height(Spacing.xl))
             }
+        }
+    }
+}
+
+@Composable
+private fun PoisonControlRow(level: String) {
+    val context = LocalContext.current
+    val color = when (level.lowercase()) {
+        "danger", "critical" -> Brand.error
+        else -> Brand.warning
+    }
+
+    Surface(
+        onClick = {
+            val phone = if (context.resources.configuration.locales[0].country == "CA") "tel:18447647669" else "tel:18002221222"
+            runCatching { context.startActivity(Intent(Intent.ACTION_DIAL, Uri.parse(phone))) }
+        },
+        color = color.copy(alpha = 0.1f),
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, color.copy(alpha = 0.3f)),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(Modifier.padding(Spacing.md), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.Phone, null, tint = color)
+            Spacer(Modifier.width(Spacing.md))
+            Text("Call Poison Control", style = MaterialTheme.typography.titleSmall, color = Color.White)
+            Spacer(Modifier.weight(1f))
+            Icon(Icons.Default.ChevronRight, null, tint = Color.White.copy(alpha = 0.3f))
         }
     }
 }

@@ -26,6 +26,9 @@ interface SnapShopDao {
     @Query("SELECT * FROM saved_items ORDER BY savedDate DESC")
     fun getAllSavedItems(): Flow<List<SavedItem>>
 
+    @Query("UPDATE saved_items SET currentLowestPrice = :price WHERE id = :id")
+    suspend fun updateSavedItemPrice(id: String, price: Double)
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSavedItem(item: SavedItem)
 
@@ -38,6 +41,12 @@ interface SnapShopDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertPriceAlert(alert: PriceAlert)
+
+    @Query("UPDATE price_alerts SET triggered = :triggered, lastCheckedDate = :date WHERE id = :id")
+    suspend fun updatePriceAlertStatus(id: String, triggered: Boolean, date: Long)
+
+    @Query("SELECT * FROM price_alerts WHERE id = :id")
+    suspend fun getPriceAlertById(id: String): PriceAlert?
 
     @Delete
     suspend fun deletePriceAlert(alert: PriceAlert)
