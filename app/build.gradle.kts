@@ -16,13 +16,16 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0.0"
-        buildConfigField("String", "BACKEND_URL", "\"https://snap-shop-api-dev.etefmelaku.workers.dev\"")
+        
+        val devUrl = "https://snap-shop-api-dev.etefmelaku.workers.dev"
+        buildConfigField("String", "BACKEND_URL", "\"${project.findProperty("BACKEND_URL_DEBUG") ?: devUrl}\"")
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
-            buildConfigField("String", "BACKEND_URL", "\"https://snap-shop-api-dev.etefmelaku.workers.dev\"")
+            val prodUrl = "https://snap-shop-api-dev.etefmelaku.workers.dev"
+            buildConfigField("String", "BACKEND_URL", "\"${project.findProperty("BACKEND_URL_RELEASE") ?: prodUrl}\"")
         }
     }
     compileOptions {

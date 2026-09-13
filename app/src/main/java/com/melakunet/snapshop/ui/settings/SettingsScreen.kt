@@ -176,7 +176,7 @@ fun SettingsScreen() {
                 Divider(color = Color.White.copy(alpha = 0.05f))
                 Spacer(Modifier.height(Spacing.md))
                 Text(
-                    "Version 1.0.0",
+                    "Version ${BuildConfig.VERSION_NAME}",
                     color = Color.White.copy(alpha = 0.3f),
                     fontSize = 12.sp,
                     modifier = Modifier.clickable {

@@ -14,6 +14,11 @@ import com.melakunet.snapshop.data.AlertRepository
 class PriceCheckWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result {
+        val prefs = applicationContext.getSharedPreferences("snapshop", 0)
+        if (!prefs.getBoolean("priceDropAlerts", true)) {
+            return Result.success()
+        }
+
         val database = (applicationContext as SnapShopApplication).database
         val repository = AlertRepository(database.dao())
 

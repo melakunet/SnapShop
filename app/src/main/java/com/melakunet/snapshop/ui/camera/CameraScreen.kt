@@ -156,6 +156,13 @@ fun CameraScreen() {
     var recording by remember { mutableStateOf<Recording?>(null) }
     var captureInFlight by remember { mutableStateOf(false) }
     
+    val retailers = remember {
+        listOf("Amazon", "Walmart", "Best Buy", "eBay", "Target", "Home Depot", "B&H")
+    }
+    val whitelist = remember(prefs) {
+        retailers.filter { prefs.getBoolean("retailer_$it", true) }
+    }
+    
     var lastBarcode by remember { mutableStateOf<String?>(null) }
 
     val imageCapture = remember { ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY).build() }
@@ -196,7 +203,7 @@ fun CameraScreen() {
                                     }
                                     if (quotaManager.canScan()) {
                                         runScan(scope, { state = it }, "Identifying...", "Barcode Scan", quotaManager) {
-                                            val result = BackendClient.scan(ByteArray(0), first) 
+                                            val result = BackendClient.scan(ByteArray(0), first, whitelist) 
                                             val product = result.first
                                             val prices = result.second
                                             val name = listOf(product.brand, product.model).filter { it.isNotEmpty() }.joinToString(" ").ifEmpty { product.category }
@@ -273,7 +280,7 @@ fun CameraScreen() {
                         val product = BackendClient.identifyDeep(frames)
                         val prices = if (product.searchQuery.isBlank()) emptyList() else {
                             try {
-                                BackendClient.shop(product.searchQuery)
+                                BackendClient.shop(product.searchQuery, whitelist)
                             } catch (e: Exception) {
                                 emptyList()
                             }
@@ -310,7 +317,7 @@ fun CameraScreen() {
                             }
                             val jpeg = toCappedJpeg(cropped, 1280, 80)
                             runScan(scope, { state = it }, "Identifying...", origin + " Scan", quotaManager) {
-                                val result = BackendClient.scan(jpeg)
+                                val result = BackendClient.scan(jpeg, whitelist = whitelist)
                                 val product = result.first
                                 val prices = result.second
                                 val name = listOf(product.brand, product.model).filter { it.isNotEmpty() }.joinToString(" ").ifEmpty { product.category }
@@ -382,7 +389,7 @@ fun CameraScreen() {
                     onSubmit = { query ->
                     runScan(scope, { state = it }, "Searching...", "Search") {
                         val product = IdentifyResult("", "", query, confidence = 1.0, searchQuery = query)
-                        val prices = BackendClient.shop(query)
+                        val prices = BackendClient.shop(query, whitelist)
                         Triple(product, prices, null)
                     }
                 },
@@ -474,7 +481,7 @@ fun CameraScreen() {
                         showPaywall = true
                     } else {
                         runScan(scope, { state = it }, "Reading link...", "URL Scan", quotaManager) {
-                            val result = BackendClient.identifyUrl(url)
+                            val result = BackendClient.identifyUrl(url, whitelist)
                             val product = result.first
                             val prices = result.second
                             val name = listOf(product.brand, product.model).filter { it.isNotEmpty() }.joinToString(" ").ifEmpty { product.category }
