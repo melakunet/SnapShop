@@ -49,6 +49,8 @@ fun ResultPanel(
     prices: List<ShopItem>,
     thumbnail: ByteArray?,
     modeLabel: String,
+    isSearchingPrices: Boolean,
+    fetchedAt: Long?,
     dao: SnapShopDao,
     onDismiss: () -> Unit
 ) {
@@ -69,6 +71,8 @@ fun ResultPanel(
             }
         }
     }
+    
+    val context = LocalContext.current
 
     Box(Modifier.fillMaxSize()) {
         Surface(modifier = Modifier.fillMaxSize(), color = Brand.backgroundDark) {
@@ -94,13 +98,52 @@ fun ResultPanel(
                         SortToggle(sortByPrice) { sortByPrice = it }
                     }
                     
+                    if (isSearchingPrices && prices.isNotEmpty()) {
+                        item {
+                            LinearProgressIndicator(
+                                modifier = Modifier.fillMaxWidth().height(2.dp),
+                                color = Brand.accentDark,
+                                trackColor = Color.Transparent
+                            )
+                        }
+                    }
+                    
                     if (prices.isEmpty()) {
                         item {
                             Box(Modifier.fillMaxWidth().padding(top = Spacing.xxl), contentAlignment = Alignment.Center) {
-                                Text("No prices to show.", color = Color.White.copy(alpha = 0.6f))
+                                if (isSearchingPrices) {
+                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                        CircularProgressIndicator(color = Brand.accentDark)
+                                        Spacer(Modifier.height(Spacing.md))
+                                        Text("Watching for prices…", color = Color.White.copy(alpha = 0.6f), style = MaterialTheme.typography.labelMedium)
+                                    }
+                                } else {
+                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                        Text("No prices found", color = Color.White.copy(alpha = 0.6f))
+                                        Spacer(Modifier.height(Spacing.lg))
+                                        Button(
+                                            onClick = {
+                                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.google.com/search?q=${Uri.encode(product.searchQuery)}"))
+                                                context.startActivity(intent)
+                                            },
+                                            colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.1f)),
+                                            shape = RoundedCornerShape(12.dp)
+                                        ) {
+                                            Icon(Icons.Default.Search, null, Modifier.size(18.dp))
+                                            Spacer(Modifier.width(8.dp))
+                                            Text("Search on Google")
+                                        }
+                                    }
+                                }
                             }
                         }
                     } else {
+                        if (fetchedAt != null) {
+                            item {
+                                StalePriceChip(fetchedAt)
+                            }
+                        }
+
                         val minPrice = prices.minOf { it.extractedPrice }
                         items(sortedPrices) { item ->
                             val isCheapest = item.extractedPrice <= minPrice
@@ -150,6 +193,39 @@ private fun ConfidenceEscalationBanner(onSwitchToDeep: () -> Unit) {
             TextButton(onClick = onSwitchToDeep) {
                 Text("Deep Scan", color = Brand.accentDark, fontWeight = FontWeight.Bold)
             }
+        }
+    }
+}
+
+@Composable
+private fun StalePriceChip(fetchedAt: Long) {
+    val relativeTime = android.text.format.DateUtils.getRelativeTimeSpanString(
+        fetchedAt,
+        System.currentTimeMillis(),
+        android.text.format.DateUtils.MINUTE_IN_MILLIS
+    )
+    Surface(
+        color = Color.White.copy(alpha = 0.05f),
+        shape = RoundedCornerShape(50),
+        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.1f)),
+        modifier = Modifier.padding(bottom = Spacing.sm)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                Icons.Default.History,
+                contentDescription = null,
+                modifier = Modifier.size(14.dp),
+                tint = Color.White.copy(alpha = 0.5f)
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                "Prices from $relativeTime",
+                style = MaterialTheme.typography.labelSmall,
+                color = Color.White.copy(alpha = 0.6f)
+            )
         }
     }
 }

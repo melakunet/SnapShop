@@ -39,3 +39,10 @@ data class PriceAlert(
     val lastCheckedDate: Long,
     val triggered: Boolean
 )
+
+@Entity(tableName = "cached_prices")
+data class CachedPriceList(
+    @PrimaryKey val normalizedQuery: String,
+    val itemsJson: String,
+    val fetchedAt: Long
+)

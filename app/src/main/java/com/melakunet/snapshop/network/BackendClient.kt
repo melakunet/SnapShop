@@ -52,7 +52,7 @@ object BackendClient {
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
         .build()
 
     private val longPollingClient = OkHttpClient.Builder()
@@ -171,6 +171,9 @@ object BackendClient {
             runCatching { json.decodeFromString<ErrEnvelope>(body) }.getOrNull()?.let { env ->
                 if (env.error.code == "plant_unidentified") {
                     throw BackendException.PlantUnidentified(env.error.message)
+                }
+                if (env.error.code == "book_unidentified") {
+                    throw BackendException.NoProductsFound("Couldn't find this book — try searching by title or author.")
                 }
                 throw BackendException.NoProductsFound(env.error.message)
             }

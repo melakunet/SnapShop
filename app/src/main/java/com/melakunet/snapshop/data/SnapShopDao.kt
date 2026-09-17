@@ -50,4 +50,10 @@ interface SnapShopDao {
 
     @Delete
     suspend fun deletePriceAlert(alert: PriceAlert)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertCachedPrices(cachedPriceList: CachedPriceList)
+
+    @Query("SELECT * FROM cached_prices WHERE normalizedQuery = :query")
+    suspend fun getCachedPrices(query: String): CachedPriceList?
 }

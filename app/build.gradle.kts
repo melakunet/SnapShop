@@ -21,6 +21,10 @@ android {
         buildConfigField("String", "BACKEND_URL", "\"${project.findProperty("BACKEND_URL_DEBUG") ?: devUrl}\"")
     }
 
+    ksp {
+        arg("room.schemaLocation", "$projectDir/schemas")
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
