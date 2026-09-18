@@ -947,6 +947,7 @@ private fun runScan(
                     }
                     stateSetter(ScanState.Done(product, prices, thumb, modeLabel, isSearchingPrices = false, fetchedAt = fetchedAt))
                 } catch (e: Exception) {
+                    android.util.Log.e("Scan", "Background shop() failed: ${e.message}", e)
                     // Fail silently back to whatever we are already showing
                     stateSetter(ScanState.Done(product, prices, thumb, modeLabel, isSearchingPrices = false, fetchedAt = fetchedAt))
                 }

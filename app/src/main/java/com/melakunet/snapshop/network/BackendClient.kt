@@ -80,7 +80,10 @@ object BackendClient {
             ShopRequestBody.serializer(),
             ShopRequestBody(query, retailerWhitelist, sort),
         )
-        return execute("/shop", "POST", payload.toRequestBody(jsonMedia))
+        android.util.Log.d("Scan", "shop() request — query: \"$query\", whitelist: $retailerWhitelist")
+        val results: List<ShopItem> = execute("/shop", "POST", payload.toRequestBody(jsonMedia))
+        android.util.Log.d("Scan", "shop() response — received ${results.size} items")
+        return results
     }
 
     /** Full precision scan. Returns (product, emptyList()) when shopping is suppressed or fails. */
