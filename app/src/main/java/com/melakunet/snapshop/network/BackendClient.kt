@@ -52,7 +52,7 @@ object BackendClient {
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(45, TimeUnit.SECONDS)
         .build()
 
     private val longPollingClient = OkHttpClient.Builder()
